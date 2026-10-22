@@ -61,6 +61,16 @@ def bottom5(scores):
     return sorted(n for n, _ in ranked), ranked
 
 
+BLUE = "#2563eb"
+PINK = "#ec4899"
+
+
+def pick_md(label, nums, note, color):
+    """One pick line: label and numbers tinted, the note left plain."""
+    return (f"<span style=\"color:{color}\">**{label}** — `{nums}`</span>"
+            f"  \n*{note}*")
+
+
 def analyze(draws):
     """Run all five methods on ONE drawing type's draws only."""
     # Method 1: raw frequency
@@ -186,16 +196,22 @@ def render_section(draw_type, sub):
 
     rows, opp_rows, freq, score_sets = analyze(draws)
 
-    # Most likely on the left, least likely on the right, side by side.
+    # Most likely on the left (blue), least likely on the right (pink).
     left, right = st.columns(2)
     with left:
-        st.subheader("Picks by each method")
+        st.markdown(f"<h3 style=\"color:{BLUE}\">Picks by each method</h3>",
+                    unsafe_allow_html=True)
         for label, nums, note in rows:
-            st.markdown(f"**{label}** — `{nums}`  \n*{note}*")
+            st.markdown(pick_md(label, nums, note, BLUE),
+                        unsafe_allow_html=True)
     with right:
-        st.subheader("Opposite picks — least likely by the same math")
+        st.markdown(
+            f"<h3 style=\"color:{PINK}\">Opposite picks — least likely by "
+            "the same math</h3>",
+            unsafe_allow_html=True)
         for label, nums, note in opp_rows:
-            st.markdown(f"**{label}** — `{nums}`  \n*{note}*")
+            st.markdown(pick_md(label, nums, note, PINK),
+                        unsafe_allow_html=True)
 
     st.subheader("Frequency chart")
     freq_df = pd.DataFrame(

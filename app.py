@@ -66,8 +66,9 @@ PINK = "#ec4899"
 
 
 def pick_md(label, nums, note, color):
-    """One pick line: label and numbers tinted, the note left plain."""
-    return (f"<span style=\"color:{color}\">**{label}** — `{nums}`</span>"
+    """One pick line: only the numbers themselves are tinted."""
+    return (f"**{label}** — <span style=\"color:{color}; "
+            f"font-weight:700; font-family:monospace\">{nums}</span>"
             f"  \n*{note}*")
 
 
@@ -196,19 +197,16 @@ def render_section(draw_type, sub):
 
     rows, opp_rows, freq, score_sets = analyze(draws)
 
-    # Most likely on the left (blue), least likely on the right (pink).
+    # Most likely on the left, least likely on the right, side by side.
+    # Only the numbers are colored: blue on the left, pink on the right.
     left, right = st.columns(2)
     with left:
-        st.markdown(f"<h3 style=\"color:{BLUE}\">Picks by each method</h3>",
-                    unsafe_allow_html=True)
+        st.subheader("Picks by each method")
         for label, nums, note in rows:
             st.markdown(pick_md(label, nums, note, BLUE),
                         unsafe_allow_html=True)
     with right:
-        st.markdown(
-            f"<h3 style=\"color:{PINK}\">Opposite picks — least likely by "
-            "the same math</h3>",
-            unsafe_allow_html=True)
+        st.subheader("Opposite picks — least likely by the same math")
         for label, nums, note in opp_rows:
             st.markdown(pick_md(label, nums, note, PINK),
                         unsafe_allow_html=True)

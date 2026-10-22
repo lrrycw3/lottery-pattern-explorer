@@ -42,6 +42,7 @@ else:
         "Drawing Type — exactly what the lottery site gives you."
     )
     st.stop()
+
 df["Draw Date"] = pd.to_datetime(df["Draw Date"], format="%m/%d/%Y")
 df["Numbers"] = df["Winning Numbers"].apply(
     lambda s: [int(x) for x in s.split(",")]

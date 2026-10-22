@@ -41,9 +41,13 @@ for col, t in zip(summary_cols[1:], ordered_types):
 
 # How many draws each section analyzes: the most recent N of that drawing
 # type, so Regular and Double Play are always compared on equal footing.
-limit = st.selectbox(
-    "Draws to analyze per drawing type (most recent first)",
-    ["All", 100, 250, 500, 750, 1000],
+# Type any number — 0 means analyze all of them, and asking for more than
+# a section has just uses everything it has.
+limit = st.number_input(
+    "Draws to analyze per drawing type (most recent first) — 0 = all",
+    min_value=0,
+    step=50,
+    value=0,
 )
 
 
@@ -182,13 +186,16 @@ def render_section(draw_type, sub):
 
     rows, opp_rows, freq, score_sets = analyze(draws)
 
-    st.subheader("Picks by each method")
-    for label, nums, note in rows:
-        st.markdown(f"**{label}** — `{nums}`  \n*{note}*")
-
-    st.subheader("Opposite picks — least likely by the same math")
-    for label, nums, note in opp_rows:
-        st.markdown(f"**{label}** — `{nums}`  \n*{note}*")
+    # Most likely on the left, least likely on the right, side by side.
+    left, right = st.columns(2)
+    with left:
+        st.subheader("Picks by each method")
+        for label, nums, note in rows:
+            st.markdown(f"**{label}** — `{nums}`  \n*{note}*")
+    with right:
+        st.subheader("Opposite picks — least likely by the same math")
+        for label, nums, note in opp_rows:
+            st.markdown(f"**{label}** — `{nums}`  \n*{note}*")
 
     st.subheader("Frequency chart")
     freq_df = pd.DataFrame(
@@ -211,7 +218,7 @@ for i, t in enumerate(ordered_types):
     if i > 0:
         st.divider()
     sub = df[df["Drawing Type"] == t].sort_values("Draw Date", ascending=False)
-    if limit != "All":
+    if limit:
         sub = sub.head(int(limit))
     render_section(t, sub)
 

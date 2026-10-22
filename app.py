@@ -9,7 +9,7 @@ st.set_page_config(page_title="Lottery Pattern Explorer", layout="wide")
 st.title("Lottery Pattern Explorer")
 st.caption(
     "New here? This tool looks at past Michigan Fantasy 5 drawings and "
-    "shows which numbers have been hot, cold, or overdue — five different "
+    "shows which numbers have been hot, cold, or overdue — six different "
     "ways, plus their opposites. It's pattern-spotting for fun: no list "
     "here can predict the next draw."
 )
@@ -123,7 +123,7 @@ def pick_md(label, nums, note, color):
 
 
 def analyze(draws):
-    """Run all five methods on ONE drawing type's draws only."""
+    """Run all six methods on ONE drawing type's draws only."""
     # Method 1: raw frequency
     freq = Counter()
     for d in draws:
@@ -215,6 +215,18 @@ def analyze(draws):
     # Method 5: random baseline
     m5 = sorted(random.sample(range(1, 40), 5))
 
+    # Method 6: hot + overdue blend — frequency and the overdue index,
+    # each scaled 0-1, then added together. Rewards numbers that both
+    # hit often AND are currently due.
+    max_freq = max(freq_scores.values())
+    max_overdue = max(overdue.values())
+    blend = {
+        n: freq_scores[n] / max_freq + overdue[n] / max_overdue
+        for n in range(1, 40)
+    }
+    m6, _ = top5(blend)
+    m6b, _ = bottom5(blend)
+
     rows = [
         ("1. Hottest numbers", m1,
          "Drawn most often in this window (raw frequency)"),
@@ -228,6 +240,9 @@ def analyze(draws):
          f"(greedy pair set)"),
         ("5. Pure random", m5,
          "A random set — same real odds as every other row"),
+        ("6. Hot + overdue mix", m6,
+         "Methods 1 + 3 blended — hotness and overdue, each scaled "
+         "0–1 and added: proven hitters that are also due"),
     ]
     # The opposites: same scores, read from the bottom instead of the top.
     # (Method 5 has no opposite — one random set is as likely as another.)
@@ -242,6 +257,9 @@ def analyze(draws):
         ("4. Weakest pair team", m4b,
          f"Built from the pair that hits together least: {seed_min} "
          f"(greedy pair set, flipped)"),
+        ("5. Cold + fresh mix", m6b,
+         "The blend flipped — coldest and freshest at once "
+         "(frequency + overdue, reversed)"),
     ]
     return rows, opp_rows, freq, (m1_scores, m2_scores, m3_scores)
 
@@ -266,12 +284,12 @@ def render_section(draw_type, sub):
     # Only the numbers are colored: blue on the left, pink on the right.
     left, right = st.columns(2)
     with left:
-        st.subheader("Most likely — five ways to pick")
+        st.subheader("Most likely — six ways to pick")
         for label, nums, note in rows:
             st.markdown(pick_md(label, nums, note, BLUE),
                         unsafe_allow_html=True)
     with right:
-        st.subheader("Least likely — the same five, flipped")
+        st.subheader("Least likely — the same math, flipped")
         for label, nums, note in opp_rows:
             st.markdown(pick_md(label, nums, note, PINK),
                         unsafe_allow_html=True)

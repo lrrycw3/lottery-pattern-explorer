@@ -6,11 +6,26 @@ import random
 
 st.set_page_config(page_title="Lottery Pattern Explorer", layout="wide")
 st.title("Lottery Pattern Explorer")
-st.caption("A teaching tool: five ways to pick numbers, and why they all have the same odds.")
+st.caption(
+    "New here? This tool looks at past Michigan Fantasy 5 drawings and "
+    "shows which numbers have been hot, cold, or overdue — five different "
+    "ways, plus their opposites. It's pattern-spotting for fun: no list "
+    "here can predict the next draw."
+)
 
-uploaded = st.file_uploader("Upload your CSV", type="csv")
+uploaded = st.file_uploader(
+    "Upload a Fantasy 5 results file (CSV)", type="csv")
 if uploaded is None:
-    st.info("Upload a CSV with columns: Draw Date, Winning Numbers, Drawing Type")
+    st.info(
+        "**How it works:**\n\n"
+        "1. Download a results file from michiganlottery.com → Winning "
+        "Numbers → Historic Winning Numbers (pick Fantasy 5 and your dates).\n"
+        "2. Upload it here.\n"
+        "3. You get the Regular Drawing and the Double Play analyzed "
+        "separately — hottest, coldest, and most overdue numbers for each.\n\n"
+        "The file needs three columns: Draw Date, Winning Numbers, "
+        "Drawing Type — exactly what the lottery site gives you."
+    )
     st.stop()
 
 df = pd.read_csv(uploaded, encoding="utf-8-sig")
@@ -38,17 +53,39 @@ summary_cols = st.columns(len(ordered_types) + 1)
 summary_cols[0].metric("Total draws", len(df))
 for col, t in zip(summary_cols[1:], ordered_types):
     col.metric(t.title(), int((df["Drawing Type"] == t).sum()))
+st.caption(
+    "Your file is split into the sections below — one per drawing type — "
+    "and each is analyzed on its own. Nothing is mixed together."
+)
 
 # How many draws each section analyzes: the most recent N of that drawing
 # type, so Regular and Double Play are always compared on equal footing.
 # Type any number — 0 means analyze all of them, and asking for more than
 # a section has just uses everything it has.
 limit = st.number_input(
-    "Draws to analyze per drawing type (most recent first) — 0 = all",
+    "How many draws back should we look? (per drawing type, most recent "
+    "first — 0 = all)",
     min_value=0,
     step=50,
     value=0,
 )
+
+with st.expander("New to this page? How to read it"):
+    st.markdown(
+        "- **Two drawings, two sections.** Fantasy 5 has a main drawing "
+        "(Regular) and a bonus drawing (Double Play) every night. They "
+        "have separate number histories, so they're never mixed.\n"
+        "- **Left side (blue numbers) = most likely.** Five ways of "
+        "picking the numbers that stand out most in past draws.\n"
+        "- **Right side (pink numbers) = least likely.** The exact "
+        "opposite of each method — the coldest, the freshest, the "
+        "weakest pairs.\n"
+        "- **The number box above** decides how far back to look, per "
+        "drawing type. 0 looks at everything in your file.\n"
+        "- **Reality check:** every 5-number combination has the same "
+        "1 in 575,757 chance. These lists describe the past; none of "
+        "them predicts the future."
+    )
 
 
 def top5(scores):
@@ -166,28 +203,43 @@ def analyze(draws):
     m5 = sorted(random.sample(range(1, 40), 5))
 
     rows = [
-        ("1. Raw frequency", m1, "All-time hottest numbers"),
-        ("2. Recency-weighted", m2, "Recent draws count more"),
-        ("3. Overdue index", m3,
-         f"Most overdue: {overdue_leader} at {overdue[overdue_leader]}× its usual gap"),
-        ("4. Greedy pair set", m4, f"Seeded from hottest pair {seed}"),
-        ("5. Random baseline", m5, "Same real odds as the others"),
+        ("1. Hottest numbers", m1,
+         "Drawn most often in this window (raw frequency)"),
+        ("2. Hot lately", m2,
+         "Recent draws count more than old ones (recency-weighted)"),
+        ("3. Most overdue", m3,
+         f"Missing longest vs their usual rhythm (overdue index) — "
+         f"{overdue_leader} is {overdue[overdue_leader]}× past due"),
+        ("4. Best pair team", m4,
+         f"Built from the pair that hits together most: {seed} "
+         f"(greedy pair set)"),
+        ("5. Pure random", m5,
+         "A random set — same real odds as every other row"),
     ]
     # The opposites: same scores, read from the bottom instead of the top.
     # (Method 5 has no opposite — one random set is as likely as another.)
     opp_rows = [
-        ("1. Raw frequency — coldest", m1b, "Least-hit numbers in the window"),
-        ("2. Recency-weighted — coldest", m2b, "Lowest recency-weighted scores"),
-        ("3. Overdue index — freshest", m3b,
-         f"Freshest: {freshest} at {overdue[freshest]}× its usual gap"),
-        ("4. Greedy pair set — weakest pairs", m4b,
-         f"Seeded from weakest pair {seed_min}"),
+        ("1. Coldest numbers", m1b,
+         "Drawn least often in this window (raw frequency, flipped)"),
+        ("2. Coldest lately", m2b,
+         "Lowest recent-draw scores (recency-weighted, flipped)"),
+        ("3. Just hit", m3b,
+         f"Freshest numbers (lowest overdue index) — {freshest} just "
+         f"hit, at {overdue[freshest]}× its usual gap"),
+        ("4. Weakest pair team", m4b,
+         f"Built from the pair that hits together least: {seed_min} "
+         f"(greedy pair set, flipped)"),
     ]
     return rows, opp_rows, freq, (m1_scores, m2_scores, m3_scores)
 
 
 def render_section(draw_type, sub):
     st.header(draw_type.title())
+    if draw_type == "REGULAR DRAWING":
+        st.caption("The main nightly Fantasy 5 drawing.")
+    elif draw_type == "DOUBLE PLAY DRAWING":
+        st.caption("The bonus drawing held right after the main one — "
+                   "its own separate number history.")
     draws = sub.sort_values("Draw Date", ascending=False).to_dict("records")
 
     c1, c2, c3 = st.columns(3)
@@ -201,24 +253,24 @@ def render_section(draw_type, sub):
     # Only the numbers are colored: blue on the left, pink on the right.
     left, right = st.columns(2)
     with left:
-        st.subheader("Picks by each method")
+        st.subheader("Most likely — five ways to pick")
         for label, nums, note in rows:
             st.markdown(pick_md(label, nums, note, BLUE),
                         unsafe_allow_html=True)
     with right:
-        st.subheader("Opposite picks — least likely by the same math")
+        st.subheader("Least likely — the same five, flipped")
         for label, nums, note in opp_rows:
             st.markdown(pick_md(label, nums, note, PINK),
                         unsafe_allow_html=True)
 
-    st.subheader("Frequency chart")
+    st.subheader("How often each number hit")
     freq_df = pd.DataFrame(
         {"Number": list(range(1, 40)),
          "Count": [freq.get(n, 0) for n in range(1, 40)]}
     ).set_index("Number")
     st.bar_chart(freq_df)
 
-    with st.expander("Show all scores"):
+    with st.expander("See the full scores behind methods 1–3"):
         for (label, _, _), scores in zip(rows[:3], score_sets):
             st.write(f"**{label}**")
             st.dataframe(pd.DataFrame(
@@ -238,6 +290,7 @@ for i, t in enumerate(ordered_types):
 
 st.divider()
 st.caption(
-    "Every set has 1 in 575,757 odds. The methods disagree because they "
-    "describe the past differently — none predicts the future."
+    "Reality check: every set of 5 numbers has the same 1 in 575,757 "
+    "odds. The methods disagree because they describe the past "
+    "differently — none of them predicts the future."
 )

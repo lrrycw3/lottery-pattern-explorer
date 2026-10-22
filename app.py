@@ -216,15 +216,28 @@ def analyze(draws):
     # Method 5: random baseline
     m5 = sorted(random.sample(range(1, 40), 5))
 
-    # Method 6: hot + overdue blend — frequency and the overdue index,
-    # each scaled 0-1, then added together. Rewards numbers that both
-    # hit often AND are currently due.
-    max_freq = max(freq_scores.values())
-    max_overdue = max(overdue.values())
-    blend = {
-        n: freq_scores[n] / max_freq + overdue[n] / max_overdue
-        for n in range(1, 40)
-    }
+    # Method 6: hot + overdue blend, by RANK. Every number is ranked
+    # 1-39 by frequency and again by the overdue index (tied numbers
+    # share the average rank); the blend adds the two ranks, so both
+    # signals get an exactly equal say. (Adding the raw scaled scores
+    # instead let overdue swamp hotness — frequency scores bunch
+    # together while overdue scores spread across the whole range.)
+    def average_ranks(scores):
+        order = sorted(scores, key=lambda n: (-scores[n], n))
+        ranks, i = {}, 0
+        while i < len(order):
+            j = i
+            while (j + 1 < len(order)
+                   and scores[order[j + 1]] == scores[order[i]]):
+                j += 1
+            for k in range(i, j + 1):
+                ranks[order[k]] = (i + j) / 2 + 1
+            i = j + 1
+        return ranks
+
+    freq_ranks = average_ranks(freq_scores)
+    overdue_ranks = average_ranks(overdue)
+    blend = {n: -(freq_ranks[n] + overdue_ranks[n]) for n in range(1, 40)}
     m6, _ = top5(blend)
     m6b, _ = bottom5(blend)
 
@@ -242,8 +255,8 @@ def analyze(draws):
         ("5. Pure random", m5,
          "A random set — same real odds as every other row"),
         ("6. Hot + overdue mix", m6,
-         "Methods 1 + 3 blended — hotness and overdue, each scaled "
-         "0–1 and added: proven hitters that are also due"),
+         "Methods 1 + 3 blended by rank — the number's hotness rank "
+         "and overdue rank averaged, so both get an equal say"),
     ]
     # The opposites: same scores, read from the bottom instead of the top.
     # (Method 5 has no opposite — one random set is as likely as another.)
@@ -259,8 +272,8 @@ def analyze(draws):
          f"Built from the pair that hits together least: {seed_min} "
          f"(greedy pair set, flipped)"),
         ("5. Cold + fresh mix", m6b,
-         "The blend flipped — coldest and freshest at once "
-         "(frequency + overdue, reversed)"),
+         "The blend flipped — the worst average of the two ranks: "
+         "coldest and freshest combined"),
     ]
     return rows, opp_rows, freq, (m1_scores, m2_scores, m3_scores)
 

@@ -39,6 +39,13 @@ summary_cols[0].metric("Total draws", len(df))
 for col, t in zip(summary_cols[1:], ordered_types):
     col.metric(t.title(), int((df["Drawing Type"] == t).sum()))
 
+# How many draws each section analyzes: the most recent N of that drawing
+# type, so Regular and Double Play are always compared on equal footing.
+limit = st.selectbox(
+    "Draws to analyze per drawing type (most recent first)",
+    ["All", 100, 250, 500, 750, 1000],
+)
+
 
 def top5(scores):
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:5]
@@ -110,7 +117,7 @@ def render_section(draw_type, sub):
     draws = sub.sort_values("Draw Date", ascending=False).to_dict("records")
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Draws", len(sub))
+    c1.metric("Draws analyzed", len(sub))
     c2.metric("Earliest", sub["Draw Date"].min().strftime("%b %d, %Y"))
     c3.metric("Latest", sub["Draw Date"].max().strftime("%b %d, %Y"))
 
@@ -135,11 +142,15 @@ def render_section(draw_type, sub):
 
 
 # One separate section per drawing type — the regular drawing and the double
-# play are never pooled together.
+# play are never pooled together. Each section gets its own most-recent draws
+# up to the limit picked above (all of them if the type has fewer).
 for i, t in enumerate(ordered_types):
     if i > 0:
         st.divider()
-    render_section(t, df[df["Drawing Type"] == t])
+    sub = df[df["Drawing Type"] == t].sort_values("Draw Date", ascending=False)
+    if limit != "All":
+        sub = sub.head(int(limit))
+    render_section(t, sub)
 
 st.divider()
 st.caption(

@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from collections import Counter, defaultdict
 from itertools import combinations
+from pathlib import Path
 import random
 
 st.set_page_config(page_title="Lottery Pattern Explorer", layout="wide")
@@ -14,8 +15,22 @@ st.caption(
 )
 
 uploaded = st.file_uploader(
-    "Upload a Fantasy 5 results file (CSV)", type="csv")
-if uploaded is None:
+    "Upload a Fantasy 5 results file (CSV) — optional", type="csv")
+
+# The app opens on its built-in results (every drawing back to January
+# 2021, kept current by a nightly update). Uploading a file is optional
+# and takes over whenever it's used.
+BUILTIN_DATA = Path(__file__).parent / "data" / "fantasy5_history.csv"
+if uploaded is not None:
+    df = pd.read_csv(uploaded, encoding="utf-8-sig")
+elif BUILTIN_DATA.exists():
+    df = pd.read_csv(BUILTIN_DATA, encoding="utf-8-sig")
+    st.info(
+        "You're looking at the built-in results — every Fantasy 5 "
+        "drawing back to **January 2021**, updated nightly. Want even "
+        "more history? Upload your own file above and it takes over."
+    )
+else:
     st.info(
         "**How it works:**\n\n"
         "1. Download a results file from michiganlottery.com → Winning "
@@ -27,8 +42,6 @@ if uploaded is None:
         "Drawing Type — exactly what the lottery site gives you."
     )
     st.stop()
-
-df = pd.read_csv(uploaded, encoding="utf-8-sig")
 df["Draw Date"] = pd.to_datetime(df["Draw Date"], format="%m/%d/%Y")
 df["Numbers"] = df["Winning Numbers"].apply(
     lambda s: [int(x) for x in s.split(",")]

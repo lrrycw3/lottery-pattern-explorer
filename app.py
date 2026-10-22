@@ -52,13 +52,20 @@ def top5(scores):
     return sorted(n for n, _ in ranked), ranked
 
 
+def bottom5(scores):
+    ranked = sorted(scores.items(), key=lambda kv: kv[1])[:5]
+    return sorted(n for n, _ in ranked), ranked
+
+
 def analyze(draws):
     """Run all five methods on ONE drawing type's draws only."""
     # Method 1: raw frequency
     freq = Counter()
     for d in draws:
         freq.update(d["Numbers"])
-    m1, m1_scores = top5({n: freq.get(n, 0) for n in range(1, 40)})
+    freq_scores = {n: freq.get(n, 0) for n in range(1, 40)}
+    m1, m1_scores = top5(freq_scores)
+    m1b, _ = bottom5(freq_scores)
 
     # Method 2: recency-weighted (draws are newest first)
     decay = 0.999
@@ -67,7 +74,9 @@ def analyze(draws):
         w = decay ** i
         for n in d["Numbers"]:
             rw[n] += w
-    m2, m2_scores = top5({n: rw.get(n, 0) for n in range(1, 40)})
+    rw_scores = {n: rw.get(n, 0) for n in range(1, 40)}
+    m2, m2_scores = top5(rw_scores)
+    m2b, _ = bottom5(rw_scores)
 
     # Method 3: overdue index — how long a number has gone without hitting
     # (its current drought) compared to its own usual gap between hits.
@@ -90,6 +99,8 @@ def analyze(draws):
         overdue[n] = round(gap / usual_gap, 2)
     m3, m3_scores = top5(overdue)
     overdue_leader = max(overdue, key=overdue.get)
+    m3b, _ = bottom5(overdue)
+    freshest = min(overdue, key=overdue.get)
 
     # Method 4: greedy pair set
     def greedy_set(seed):
@@ -112,6 +123,30 @@ def analyze(draws):
     else:
         m4, seed = [1, 2, 3, 4, 5], (0, 0)
 
+    # Method 4, opposite: a greedy set built on the weakest pairs — start
+    # from the pair that has hit together least (often never) and keep
+    # adding the number that pairs weakest with those already chosen.
+    def greedy_set_min(seed_pair):
+        chosen = list(seed_pair)
+        while len(chosen) < 5:
+            best_n, best_gain = None, None
+            for cand in range(1, 40):
+                if cand in chosen:
+                    continue
+                gain = sum(pair_counts.get(tuple(sorted((cand, c))), 0)
+                           for c in chosen)
+                if best_gain is None or gain < best_gain:
+                    best_n, best_gain = cand, gain
+            chosen.append(best_n)
+        return sorted(chosen)
+
+    if pair_counts:
+        seed_min = min(combinations(range(1, 40), 2),
+                       key=lambda p: (pair_counts.get(p, 0), p))
+        m4b = greedy_set_min(seed_min)
+    else:
+        m4b, seed_min = [1, 2, 3, 4, 5], (0, 0)
+
     # Method 5: random baseline
     m5 = sorted(random.sample(range(1, 40), 5))
 
@@ -123,7 +158,17 @@ def analyze(draws):
         ("4. Greedy pair set", m4, f"Seeded from hottest pair {seed}"),
         ("5. Random baseline", m5, "Same real odds as the others"),
     ]
-    return rows, freq, (m1_scores, m2_scores, m3_scores)
+    # The opposites: same scores, read from the bottom instead of the top.
+    # (Method 5 has no opposite — one random set is as likely as another.)
+    opp_rows = [
+        ("1. Raw frequency — coldest", m1b, "Least-hit numbers in the window"),
+        ("2. Recency-weighted — coldest", m2b, "Lowest recency-weighted scores"),
+        ("3. Overdue index — freshest", m3b,
+         f"Freshest: {freshest} at {overdue[freshest]}× its usual gap"),
+        ("4. Greedy pair set — weakest pairs", m4b,
+         f"Seeded from weakest pair {seed_min}"),
+    ]
+    return rows, opp_rows, freq, (m1_scores, m2_scores, m3_scores)
 
 
 def render_section(draw_type, sub):
@@ -135,10 +180,14 @@ def render_section(draw_type, sub):
     c2.metric("Earliest", sub["Draw Date"].min().strftime("%b %d, %Y"))
     c3.metric("Latest", sub["Draw Date"].max().strftime("%b %d, %Y"))
 
-    rows, freq, score_sets = analyze(draws)
+    rows, opp_rows, freq, score_sets = analyze(draws)
 
     st.subheader("Picks by each method")
     for label, nums, note in rows:
+        st.markdown(f"**{label}** — `{nums}`  \n*{note}*")
+
+    st.subheader("Opposite picks — least likely by the same math")
+    for label, nums, note in opp_rows:
         st.markdown(f"**{label}** — `{nums}`  \n*{note}*")
 
     st.subheader("Frequency chart")

@@ -69,14 +69,27 @@ def analyze(draws):
             rw[n] += w
     m2, m2_scores = top5({n: rw.get(n, 0) for n in range(1, 40)})
 
-    # Method 3: co-occurrence centrality
+    # Method 3: overdue index — how long a number has gone without hitting
+    # (its current drought) compared to its own usual gap between hits.
+    # Score 2.0 means it has been missing twice as long as it usually goes.
+    # (Pair counts are tallied here too because Method 4 builds on them.)
     pair_counts = Counter()
     for d in draws:
         for p in combinations(sorted(d["Numbers"]), 2):
             pair_counts[p] += 1
-    cooc = {n: sum(c for (a, b), c in pair_counts.items() if a == n or b == n)
-            for n in range(1, 40)}
-    m3, m3_scores = top5(cooc)
+    total = len(draws)
+    overdue = {}
+    for n in range(1, 40):
+        gap = 0
+        for d in draws:  # draws are newest first
+            if n in d["Numbers"]:
+                break
+            gap += 1
+        hits = freq.get(n, 0)
+        usual_gap = total / hits if hits else total
+        overdue[n] = round(gap / usual_gap, 2)
+    m3, m3_scores = top5(overdue)
+    overdue_leader = max(overdue, key=overdue.get)
 
     # Method 4: greedy pair set
     def greedy_set(seed):
@@ -105,7 +118,8 @@ def analyze(draws):
     rows = [
         ("1. Raw frequency", m1, "All-time hottest numbers"),
         ("2. Recency-weighted", m2, "Recent draws count more"),
-        ("3. Co-occurrence centrality", m3, "Frequency × 4 — not independent"),
+        ("3. Overdue index", m3,
+         f"Most overdue: {overdue_leader} at {overdue[overdue_leader]}× its usual gap"),
         ("4. Greedy pair set", m4, f"Seeded from hottest pair {seed}"),
         ("5. Random baseline", m5, "Same real odds as the others"),
     ]

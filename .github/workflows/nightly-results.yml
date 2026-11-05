@@ -37,6 +37,15 @@ jobs:
         timeout-minutes: 15
         run: python scripts/update_results.py
 
+      - name: Upload debug artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-pages
+          path: |
+            debug-*.png
+            debug-*.html
+
       - name: Commit and push if the data changed
         run: |
           git config user.name "lottery-results-bot"

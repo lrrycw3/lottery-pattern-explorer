@@ -25,11 +25,16 @@ jobs:
           python-version: "3.12"
 
       - name: Install Playwright
+        timeout-minutes: 10
         run: |
           pip install playwright
-          playwright install chromium --with-deps
+          # No --with-deps: GitHub's ubuntu runner already carries the
+          # browser libraries, and --with-deps stalled for an hour on
+          # the Ubuntu font-mirror downloads in run #1.
+          playwright install chromium
 
       - name: Update results from Michigan Lottery
+        timeout-minutes: 15
         run: python scripts/update_results.py
 
       - name: Commit and push if the data changed

@@ -698,6 +698,8 @@ def _builtin_draws(path):
         return None
     df = pd.read_csv(path, encoding="utf-8-sig")
     df["Draw Date"] = pd.to_datetime(df["Draw Date"], format="%m/%d/%Y")
+    df["Numbers"] = df["Winning Numbers"].apply(
+        lambda s: [int(x) for x in str(s).split(",")])
     df["Drawing Type"] = df["Drawing Type"].astype(str).str.strip()
     return df
 
@@ -711,6 +713,64 @@ def _yesterday_row(df, day, drawing_type):
     if match.empty:
         return None
     return str(match.iloc[0]["Winning Numbers"])
+
+
+def _f5_state_before(draws, idx, window=100):
+    """Trailing-window state as it stood just before draw `idx`.
+
+    Counts cover only the trailing window (as in the walk-forward
+    backtest); last_seen covers all earlier draws.
+    """
+    counts = Counter()
+    last_seen = {}
+    for i in range(idx):
+        for k in draws[i]:
+            last_seen[k] = i
+    for i in range(max(0, idx - window), idx):
+        counts.update(draws[i])
+    return counts, last_seen
+
+
+def _f5_random_pick_for(idx, window=100, seed=42):
+    """The Random pick the walk-forward backtest made for draw `idx`.
+
+    Replays the seeded rng in draw order, exactly as
+    fantasy_backtest does, and returns the pick for `idx` (None if
+    `idx` is before the trailing window, where no pick exists).
+    """
+    rng = random.Random(seed)
+    for i in range(window, idx + 1):
+        pick = sorted(rng.sample(range(1, 40), 5))
+        if i == idx:
+            return pick
+    return None
+
+
+def _d5_state_before(draws, idx, window=25):
+    """Per-position trailing-window state just before draw `idx`."""
+    pos_counts = [Counter() for _ in range(5)]
+    pos_last = [dict() for _ in range(5)]
+    for i in range(idx):
+        for pos, d in enumerate(draws[i]):
+            pos_last[pos][d] = i
+    for i in range(max(0, idx - window), idx):
+        for pos, d in enumerate(draws[i]):
+            pos_counts[pos][d] += 1
+    return pos_counts, pos_last
+
+
+def _d5_random_pick_for(idx, window=25, seed=42):
+    """The Random pick the walk-forward backtest made for draw `idx`."""
+    rng = random.Random(seed)
+    for i in range(window, idx + 1):
+        pick = [rng.randrange(10) for _ in range(5)]
+        if i == idx:
+            return pick
+    return None
+
+
+def _fmt_pick(pick):
+    return ", ".join(str(x) for x in pick)
 
 
 def render_winners_tab():
@@ -739,6 +799,70 @@ def render_winners_tab():
                      "Winning numbers":
                          nums if nums is not None else "none"})
     st.dataframe(pd.DataFrame(rows), width="stretch")
+
+    # How yesterday's methods did: each method's pick for yesterday,
+    # made from the data available before yesterday's draw, scored
+    # against yesterday's actual winners.
+    st.divider()
+    st.subheader("How the methods did yesterday")
+    st.caption(
+        "Each method's pick for yesterday, made only from draws "
+        "before yesterday — then scored against what actually came "
+        "out. Fantasy 5 baseline is 0.641 hits per draw; Daily 5 "
+        "baseline is 0.5 matching positions per draw. A good day for "
+        "a method here is still just noise unless it repeats."
+    )
+    for label, drawing_type, df, is_daily in [
+            ("Fantasy 5 — Regular", "REGULAR DRAWING", f5, False),
+            ("Fantasy 5 — Double Play", "DOUBLE PLAY DRAWING", f5, False),
+            ("Daily 5 — Midday", "MIDDAY DRAWING", d5, True),
+            ("Daily 5 — Evening", "EVENING DRAWING", d5, True)]:
+        st.write(f"**{label}**")
+        if df is None:
+            st.write("none")
+            continue
+        sub = df[df["Drawing Type"] == drawing_type]
+        dates = sorted(sub["Draw Date"].unique())
+        if day not in dates:
+            st.write("none — no draw for yesterday in the data yet")
+            continue
+        draws = chronological(sub)
+        idx = dates.index(day)
+        actual = draws[idx]
+        if is_daily:
+            pos_counts, pos_last = _d5_state_before(draws, idx)
+            picks = daily_picks(pos_counts, pos_last, idx)
+            picks["Random"] = _d5_random_pick_for(idx)
+            order = ["Hot", "Cold", "Balanced", "Gap", "Random",
+                     "Anti", "Popular"]
+            comp = [{"Method": m,
+                     "Pick for yesterday":
+                         _fmt_pick(picks[m]) if picks[m] is not None
+                         else "none",
+                     "Matching positions": (
+                         str(sum(1 for a, b in zip(picks[m], actual)
+                                 if a == b))
+                         if picks[m] is not None else "none")}
+                    for m in order]
+        else:
+            counts, last_seen = _f5_state_before(draws, idx)
+            picks = fantasy_picks(counts, last_seen, idx)
+            picks["Random"] = _f5_random_pick_for(idx)
+            with st.spinner("Checking the backtested rule's pick…"):
+                _, _, _, rule_next, _ = fantasy_rule_search(
+                    draws[:idx])
+            picks["Backtested rule"] = sorted(rule_next)
+            order = ["Hot", "Cold", "Balanced", "Gap", "Random",
+                     "Anti", "Popular", "Backtested rule"]
+            comp = [{"Method": m,
+                     "Pick for yesterday":
+                         _fmt_pick(picks[m]) if picks[m] is not None
+                         else "none",
+                     "Hits": (
+                         str(len(set(picks[m]) & set(actual)))
+                         if picks[m] is not None else "none")}
+                    for m in order]
+        st.dataframe(pd.DataFrame(comp), width="stretch")
 
 
 # ---------------------------------------------------------------------------

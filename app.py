@@ -16,7 +16,9 @@
 import math
 import random
 from collections import Counter, deque
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -687,14 +689,70 @@ def render_daily_tab():
 
 
 # ---------------------------------------------------------------------------
+# Yesterday's Winners tab — previous day's official numbers, or "none"
+# ---------------------------------------------------------------------------
+
+def _builtin_draws(path):
+    """Built-in CSV as a dataframe, or None if the file is absent."""
+    if not path.exists():
+        return None
+    df = pd.read_csv(path, encoding="utf-8-sig")
+    df["Draw Date"] = pd.to_datetime(df["Draw Date"], format="%m/%d/%Y")
+    df["Drawing Type"] = df["Drawing Type"].astype(str).str.strip()
+    return df
+
+
+def _yesterday_row(df, day, drawing_type):
+    """Winning numbers string for one drawing type on one date, or None."""
+    if df is None:
+        return None
+    match = df[(df["Draw Date"] == day)
+               & (df["Drawing Type"] == drawing_type)]
+    if match.empty:
+        return None
+    return str(match.iloc[0]["Winning Numbers"])
+
+
+def render_winners_tab():
+    st.subheader("Yesterday's Winners")
+    yesterday = (datetime.now(ZoneInfo("America/Detroit")).date()
+                 - timedelta(days=1))
+    st.caption(
+        "The previous day's winning numbers, read straight from the "
+        "built-in results (updated nightly). If a draw isn't in the "
+        "data yet, it reads none — nothing is guessed or filled in."
+    )
+    st.write(f"**Showing draws for "
+             f"{yesterday.strftime('%A, %B %d, %Y')}**")
+    day = pd.Timestamp(yesterday)
+    base = Path(__file__).parent / "data"
+    f5 = _builtin_draws(base / "fantasy5_history.csv")
+    d5 = _builtin_draws(base / "daily5_history.csv")
+    rows = []
+    for label, drawing_type, df in [
+            ("Fantasy 5 — Regular", "REGULAR DRAWING", f5),
+            ("Fantasy 5 — Double Play", "DOUBLE PLAY DRAWING", f5),
+            ("Daily 5 — Midday", "MIDDAY DRAWING", d5),
+            ("Daily 5 — Evening", "EVENING DRAWING", d5)]:
+        nums = _yesterday_row(df, day, drawing_type)
+        rows.append({"Drawing": label,
+                     "Winning numbers":
+                         nums if nums is not None else "none"})
+    st.dataframe(pd.DataFrame(rows), width="stretch")
+
+
+# ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
 
-tab_f5, tab_d5 = st.tabs(["Fantasy 5", "Daily 5"])
+tab_f5, tab_d5, tab_win = st.tabs(
+    ["Fantasy 5", "Daily 5", "Yesterday's Winners"])
 with tab_f5:
     render_fantasy_tab()
 with tab_d5:
     render_daily_tab()
+with tab_win:
+    render_winners_tab()
 
 st.divider()
 with st.expander("Honesty rules baked into this page"):

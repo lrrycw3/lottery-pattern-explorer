@@ -131,19 +131,23 @@ def fetch_game(page, code: str, start: date, end: date):
     page.goto(BASE_URL.format(code=code), wait_until="domcontentloaded")
     get_results = page.get_by_role("button", name="Get Results")
     get_results.wait_for(timeout=60000)
-    page.get_by_role("textbox", name="Start Date").fill(fmt_date(start))
-    page.get_by_role("textbox", name="End Date").fill(fmt_date(end))
-    # Blur the fields so the date picker parses the typed values.
-    page.get_by_role("textbox", name="End Date").press("Tab")
+    # Type the dates with real keystrokes: these are React date inputs
+    # that only parse typed input, not programmatic value sets.
+    for name, value in (("Start Date", fmt_date(start)),
+                        ("End Date", fmt_date(end))):
+        box = page.get_by_role("textbox", name=name)
+        box.click()
+        box.press_sequentially(value, delay=30)
+    page.keyboard.press("Tab")
     get_results.wait_for(state="visible")
     if not get_results.is_enabled():
         raise RuntimeError(
             f"Get Results stayed disabled for game {code} "
             f"({fmt_date(start)} to {fmt_date(end)})")
-    with page.expect_download(timeout=60000) as dl_info:
-        get_results.click()
-        page.get_by_role("link", name="Download").first.wait_for(
-            timeout=60000)
+    get_results.click()
+    # Wait for the results table to render before looking for Download.
+    page.locator("text=Displaying").first.wait_for(timeout=120000)
+    with page.expect_download(timeout=120000) as dl_info:
         page.get_by_role("link", name="Download").first.click()
     download = dl_info.value
     tmp = REPO_ROOT / f".past-results-{code}.csv"
@@ -243,7 +247,17 @@ def main() -> int:
                     print(f"game {code}: {rel} already current "
                           f"through {fmt_date(start)}")
                     continue
-                downloaded = fetch_game(page, code, start, today)
+                try:
+                    downloaded = fetch_game(page, code, start, today)
+                except Exception:
+                    # Save what the page looked like so a failed run
+                    # can be diagnosed from its artifacts.
+                    page.screenshot(
+                        path=str(REPO_ROOT / f"debug-{code}.png"),
+                        full_page=True)
+                    (REPO_ROOT / f"debug-{code}.html").write_text(
+                        page.content(), encoding="utf-8")
+                    raise
                 added = merge_game(code, path, types, kind,
                                    downloaded, start, today)
                 total_added += added

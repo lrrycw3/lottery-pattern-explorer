@@ -689,7 +689,7 @@ def render_daily_tab():
 
 
 # ---------------------------------------------------------------------------
-# Yesterday's Winners tab — previous day's official numbers, or "none"
+# Recent Winners tab — last 5 days of official numbers, or "none"
 # ---------------------------------------------------------------------------
 
 def _builtin_draws(path):
@@ -773,96 +773,150 @@ def _fmt_pick(pick):
     return ", ".join(str(x) for x in pick)
 
 
+def _method_comparison(df, drawing_type, day, is_daily):
+    """Per-method picks for `day`, made only from draws before that
+    day, scored against that day's actual winners.
+
+    Returns (table, scores): table is the dataframe shown for the day
+    (or None when the draw isn't in the data yet); scores maps each
+    method to its hits (Fantasy 5) or matching positions (Daily 5).
+    """
+    sub = df[df["Drawing Type"] == drawing_type]
+    dates = sorted(sub["Draw Date"].unique())
+    if day not in dates:
+        return None, None
+    draws = chronological(sub)
+    idx = dates.index(day)
+    actual = draws[idx]
+    scores = {}
+    if is_daily:
+        pos_counts, pos_last = _d5_state_before(draws, idx)
+        picks = daily_picks(pos_counts, pos_last, idx)
+        picks["Random"] = _d5_random_pick_for(idx)
+        order = ["Hot", "Cold", "Balanced", "Gap", "Random",
+                 "Anti", "Popular"]
+        rows = []
+        for m in order:
+            pick = picks[m]
+            if pick is None:
+                rows.append({"Method": m, "Pick": "none",
+                             "Matching positions": "none"})
+            else:
+                hits = sum(1 for a, b in zip(pick, actual) if a == b)
+                scores[m] = hits
+                rows.append({"Method": m, "Pick": _fmt_pick(pick),
+                             "Matching positions": str(hits)})
+    else:
+        counts, last_seen = _f5_state_before(draws, idx)
+        picks = fantasy_picks(counts, last_seen, idx)
+        picks["Random"] = _f5_random_pick_for(idx)
+        with st.spinner("Checking the backtested rule's pick…"):
+            _, _, _, rule_next, _ = fantasy_rule_search(draws[:idx])
+        picks["Backtested rule"] = sorted(rule_next)
+        order = ["Hot", "Cold", "Balanced", "Gap", "Random",
+                 "Anti", "Popular", "Backtested rule"]
+        rows = []
+        for m in order:
+            pick = picks[m]
+            if pick is None:
+                rows.append({"Method": m, "Pick": "none", "Hits": "none"})
+            else:
+                hits = len(set(pick) & set(actual))
+                scores[m] = hits
+                rows.append({"Method": m, "Pick": _fmt_pick(pick),
+                             "Hits": str(hits)})
+    return pd.DataFrame(rows), scores
+
+
 def render_winners_tab():
-    st.subheader("Yesterday's Winners")
-    yesterday = (datetime.now(ZoneInfo("America/Detroit")).date()
-                 - timedelta(days=1))
+    st.subheader("Recent Winners")
     st.caption(
-        "The previous day's winning numbers, read straight from the "
-        "built-in results (updated nightly). If a draw isn't in the "
-        "data yet, it reads none — nothing is guessed or filled in."
+        "The last 5 days of winning numbers, read straight from the "
+        "built-in results (updated nightly), with each method's pick "
+        "for each day scored against what actually came out. Picks are "
+        "made only from draws before that day — then the 5 days are "
+        "totalled up per method. If a draw isn't in the data yet, it "
+        "reads none — nothing is guessed or filled in."
     )
-    st.write(f"**Showing draws for "
-             f"{yesterday.strftime('%A, %B %d, %Y')}**")
-    day = pd.Timestamp(yesterday)
     base = Path(__file__).parent / "data"
     f5 = _builtin_draws(base / "fantasy5_history.csv")
     d5 = _builtin_draws(base / "daily5_history.csv")
-    rows = []
-    for label, drawing_type, df in [
-            ("Fantasy 5 — Regular", "REGULAR DRAWING", f5),
-            ("Fantasy 5 — Double Play", "DOUBLE PLAY DRAWING", f5),
-            ("Daily 5 — Midday", "MIDDAY DRAWING", d5),
-            ("Daily 5 — Evening", "EVENING DRAWING", d5)]:
-        nums = _yesterday_row(df, day, drawing_type)
-        rows.append({"Drawing": label,
-                     "Winning numbers":
-                         nums if nums is not None else "none"})
-    st.dataframe(pd.DataFrame(rows), width="stretch")
+    all_dates = set()
+    for df in (f5, d5):
+        if df is not None:
+            all_dates.update(df["Draw Date"].unique())
+    days = sorted((pd.Timestamp(d) for d in all_dates),
+                  reverse=True)[:5]
+    if not days:
+        st.write("none — no draws in the data yet")
+        return
+    drawings = [
+        ("Fantasy 5 — Regular", "REGULAR DRAWING", f5, False),
+        ("Fantasy 5 — Double Play", "DOUBLE PLAY DRAWING", f5, False),
+        ("Daily 5 — Midday", "MIDDAY DRAWING", d5, True),
+        ("Daily 5 — Evening", "EVENING DRAWING", d5, True),
+    ]
+    st.write("**Winning numbers — last 5 days**")
+    win_rows = []
+    for day in days:
+        row = {"Date": day.strftime("%a, %b %d, %Y")}
+        for label, drawing_type, df, _ in drawings:
+            nums = (_yesterday_row(df, day, drawing_type)
+                    if df is not None else None)
+            row[label] = nums if nums is not None else "none"
+        win_rows.append(row)
+    st.dataframe(pd.DataFrame(win_rows), width="stretch")
 
-    # How yesterday's methods did: each method's pick for yesterday,
-    # made from the data available before yesterday's draw, scored
-    # against yesterday's actual winners.
+    # Score every method on each of the 5 days, then total them up.
+    totals = {label: {} for label, _, _, _ in drawings}
+    day_tables = {}
+    for day in days:
+        for label, drawing_type, df, is_daily in drawings:
+            if df is None:
+                continue
+            table, scores = _method_comparison(
+                df, drawing_type, day, is_daily)
+            day_tables[(day, label)] = table
+            if scores:
+                for m, s in scores.items():
+                    totals[label][m] = totals[label].get(m, 0) + s
+
     st.divider()
-    st.subheader("How the methods did yesterday")
+    st.subheader("How the methods did — last 5 days")
     st.caption(
-        "Each method's pick for yesterday, made only from draws "
-        "before yesterday — then scored against what actually came "
-        "out. Fantasy 5 baseline is 0.641 hits per draw; Daily 5 "
-        "baseline is 0.5 matching positions per draw. A good day for "
-        "a method here is still just noise unless it repeats."
+        "Total hits per method across the 5 days. By chance alone, "
+        "Fantasy 5 averages 0.641 hits per draw — about 3.2 in 5 days; "
+        "Daily 5 averages 0.5 matching positions per draw — about 2.5 "
+        "in 5 days. A good 5 days for a method here is still just "
+        "noise unless it repeats."
     )
-    for label, drawing_type, df, is_daily in [
-            ("Fantasy 5 — Regular", "REGULAR DRAWING", f5, False),
-            ("Fantasy 5 — Double Play", "DOUBLE PLAY DRAWING", f5, False),
-            ("Daily 5 — Midday", "MIDDAY DRAWING", d5, True),
-            ("Daily 5 — Evening", "EVENING DRAWING", d5, True)]:
+    for label, _, _, is_daily in drawings:
         st.write(f"**{label}**")
-        if df is None:
-            st.write("none")
-            continue
-        sub = df[df["Drawing Type"] == drawing_type]
-        dates = sorted(sub["Draw Date"].unique())
-        if day not in dates:
-            st.write("none — no draw for yesterday in the data yet")
-            continue
-        draws = chronological(sub)
-        idx = dates.index(day)
-        actual = draws[idx]
-        if is_daily:
-            pos_counts, pos_last = _d5_state_before(draws, idx)
-            picks = daily_picks(pos_counts, pos_last, idx)
-            picks["Random"] = _d5_random_pick_for(idx)
-            order = ["Hot", "Cold", "Balanced", "Gap", "Random",
-                     "Anti", "Popular"]
-            comp = [{"Method": m,
-                     "Pick for yesterday":
-                         _fmt_pick(picks[m]) if picks[m] is not None
-                         else "none",
-                     "Matching positions": (
-                         str(sum(1 for a, b in zip(picks[m], actual)
-                                 if a == b))
-                         if picks[m] is not None else "none")}
-                    for m in order]
-        else:
-            counts, last_seen = _f5_state_before(draws, idx)
-            picks = fantasy_picks(counts, last_seen, idx)
-            picks["Random"] = _f5_random_pick_for(idx)
-            with st.spinner("Checking the backtested rule's pick…"):
-                _, _, _, rule_next, _ = fantasy_rule_search(
-                    draws[:idx])
-            picks["Backtested rule"] = sorted(rule_next)
-            order = ["Hot", "Cold", "Balanced", "Gap", "Random",
-                     "Anti", "Popular", "Backtested rule"]
-            comp = [{"Method": m,
-                     "Pick for yesterday":
-                         _fmt_pick(picks[m]) if picks[m] is not None
-                         else "none",
-                     "Hits": (
-                         str(len(set(picks[m]) & set(actual)))
-                         if picks[m] is not None else "none")}
-                    for m in order]
-        st.dataframe(pd.DataFrame(comp), width="stretch")
+        methods = ["Hot", "Cold", "Balanced", "Gap", "Random",
+                   "Anti", "Popular"]
+        if not is_daily:
+            methods.append("Backtested rule")
+        col = ("Total matching positions in 5 days" if is_daily
+               else "Total hits in 5 days")
+        rows = [{"Method": m, col: str(totals[label].get(m, 0))}
+                for m in methods]
+        st.dataframe(pd.DataFrame(rows), width="stretch")
+
+    st.divider()
+    st.subheader("Day by day")
+    st.caption("Newest day first. Each day's picks were made only "
+               "from draws before that day.")
+    for i, day in enumerate(days):
+        with st.expander(day.strftime("%A, %B %d, %Y"),
+                         expanded=(i == 0)):
+            for label, _, _, _ in drawings:
+                st.write(f"**{label}**")
+                table = day_tables.get((day, label))
+                if table is None:
+                    st.write("none — no draw for this day in the "
+                             "data yet")
+                else:
+                    st.dataframe(table, width="stretch")
 
 
 # ---------------------------------------------------------------------------
@@ -870,7 +924,7 @@ def render_winners_tab():
 # ---------------------------------------------------------------------------
 
 tab_f5, tab_d5, tab_win = st.tabs(
-    ["Fantasy 5", "Daily 5", "Yesterday's Winners"])
+    ["Fantasy 5", "Daily 5", "Recent Winners"])
 with tab_f5:
     render_fantasy_tab()
 with tab_d5:

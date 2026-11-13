@@ -205,12 +205,22 @@ def fantasy_backtest(draws, window=100, seed=42):
 D5_POPULAR = [7, 3, 1, 9, 2]  # fixed "lucky" sequence
 D5_METHODS = ["Hot", "Cold", "Balanced", "Gap",
               "Random", "Anti", "Popular"]
+# Daily 3 / Daily 4 use the same methods minus Popular (dropped at the
+# user's request, Nov 13, 2026).
+D34_METHODS = ["Hot", "Cold", "Balanced", "Gap", "Random", "Anti"]
 
 
-def daily_picks(pos_counts, pos_last, now):
-    """Per-position picks from trailing-window state."""
+def daily_picks(pos_counts, pos_last, now, popular=None):
+    """Per-position picks from trailing-window state.
+
+    popular: fixed lucky sequence to include as the "Popular" method,
+    or None to leave it out. Balanced picks the hottest digit per
+    position that has not already been used in an earlier position.
+    """
+    n_pos = len(pos_counts)
     hot, cold, balanced, gap = [], [], [], []
-    for pos in range(5):
+    used = set()
+    for pos in range(n_pos):
         counts, last = pos_counts[pos], pos_last[pos]
         desc = sorted(range(10), key=lambda d: (-counts.get(d, 0), d))
         asc = sorted(range(10), key=lambda d: (counts.get(d, 0), d))
@@ -219,42 +229,45 @@ def daily_picks(pos_counts, pos_last, now):
         gaps = {d: (now - last[d] if d in last else now + 1)
                 for d in range(10)}
         gap.append(sorted(range(10), key=lambda d: (-gaps[d], d))[0])
-        used = set()
         for d in desc:
             if d not in used:
                 balanced.append(d)
                 used.add(d)
                 break
     anti = []
-    for pos in range(5):
+    for pos in range(n_pos):
         counts = pos_counts[pos]
         forbidden = {hot[pos], cold[pos], balanced[pos], gap[pos]}
         asc = sorted(range(10), key=lambda d: (counts.get(d, 0), d))
         pick = next((d for d in asc if d not in forbidden), asc[0])
         anti.append(pick)
-    return {
+    picks = {
         "Hot": hot,
         "Cold": cold,
         "Balanced": balanced,
         "Gap": gap,
         "Anti": anti,
-        "Popular": list(D5_POPULAR),
     }
+    if popular is not None:
+        picks["Popular"] = list(popular)
+    return picks
 
 
 @st.cache_data
-def daily_backtest(draws, window=25, seed=42):
+def daily_backtest(draws, window=25, seed=42, popular=None):
+    n_pos = len(draws[0]) if draws else 5
+    methods = D5_METHODS if popular is not None else D34_METHODS
     rng = random.Random(seed)
-    pos_counts = [Counter() for _ in range(5)]
-    pos_last = [dict() for _ in range(5)]
+    pos_counts = [Counter() for _ in range(n_pos)]
+    pos_last = [dict() for _ in range(n_pos)]
     win = deque()
-    scores = {m: [] for m in D5_METHODS}
-    exact = {m: 0 for m in D5_METHODS}
+    scores = {m: [] for m in methods}
+    exact = {m: 0 for m in methods}
     for i, actual in enumerate(draws):
         if i >= window:
-            picks = daily_picks(pos_counts, pos_last, i)
-            picks["Random"] = [rng.randrange(10) for _ in range(5)]
-            for m in D5_METHODS:
+            picks = daily_picks(pos_counts, pos_last, i, popular=popular)
+            picks["Random"] = [rng.randrange(10) for _ in range(n_pos)]
+            for m in methods:
                 pk = picks[m]
                 scores[m].append(sum(1 for a, b in zip(pk, actual)
                                      if a == b))
@@ -269,12 +282,103 @@ def daily_backtest(draws, window=25, seed=42):
                 pos_counts[pos][d] -= 1
                 if pos_counts[pos][d] == 0:
                     del pos_counts[pos][d]
-    next_picks = daily_picks(pos_counts, pos_last, len(draws))
+    next_picks = daily_picks(pos_counts, pos_last, len(draws),
+                             popular=popular)
     next_picks["Random"] = [random.Random(seed + 1).randrange(10)
-                            for _ in range(5)]
+                            for _ in range(n_pos)]
     results = {m: (scores[m], exact[m], len(scores[m]))
-               for m in D5_METHODS}
+               for m in methods}
     return results, next_picks
+
+
+# ---------------------------------------------------------------------------
+# Method 5 for digit games (Daily 3 / Daily 4): backtested rule search —
+# same overfitting demo as the Fantasy 5 rule search, but per position.
+# Daily 5 does NOT run this row: its built-in history starts Aug 2026,
+# too short to split 70/30 and still have a meaningful test set.
+# ---------------------------------------------------------------------------
+
+D34_RULE_GRID = []
+for _w in (10, 25, 50, 100):
+    D34_RULE_GRID.append((f"Hot (window {_w})", "hot", _w))
+    D34_RULE_GRID.append((f"Cold (window {_w})", "cold", _w))
+D34_RULE_GRID.append(("Gap (largest gaps)", "gap", None))
+D34_RULE_GRID.append(("Balanced (window 25)", "balanced", 25))
+D34_RULE_GRID.append(("Balanced (window 100)", "balanced", 100))
+
+
+def _digit_rule_pick(kind, window, pos_counts, pos_last, now):
+    n_pos = len(pos_counts)
+    pick, used = [], set()
+    for pos in range(n_pos):
+        counts, last = pos_counts[pos], pos_last[pos]
+        if kind == "hot":
+            pick.append(sorted(range(10),
+                               key=lambda d: (-counts.get(d, 0), d))[0])
+        elif kind == "cold":
+            pick.append(sorted(range(10),
+                               key=lambda d: (counts.get(d, 0), d))[0])
+        elif kind == "balanced":
+            desc = sorted(range(10),
+                          key=lambda d: (-counts.get(d, 0), d))
+            pick.append(next(d for d in desc if d not in used))
+            used.add(pick[-1])
+        else:  # gap
+            gaps = {d: (now - last[d] if d in last else now + 1)
+                    for d in range(10)}
+            pick.append(sorted(range(10),
+                               key=lambda d: (-gaps[d], d))[0])
+    return pick
+
+
+@st.cache_data
+def digit_rule_search(draws):
+    """Returns (best_name, train_mean, test_scores, next_pick, n_rules)."""
+    n_pos = len(draws[0])
+    split = int(len(draws) * 0.7)
+    best = None
+    for name, kind, window in D34_RULE_GRID:
+        pos_counts = [Counter() for _ in range(n_pos)]
+        pos_last = [dict() for _ in range(n_pos)]
+        win = deque()
+        train_hits, test_hits = [], []
+        for i, actual in enumerate(draws):
+            pick = None
+            if kind in ("hot", "cold", "balanced") and i >= window:
+                pick = _digit_rule_pick(kind, window, pos_counts,
+                                        pos_last, i)
+            elif kind == "gap" and i >= 1:
+                pick = _digit_rule_pick(kind, window, pos_counts,
+                                        pos_last, i)
+            if pick is not None:
+                h = sum(1 for a, b in zip(pick, actual) if a == b)
+                (train_hits if i < split else test_hits).append(h)
+            win.append(actual)
+            for pos, d in enumerate(actual):
+                pos_counts[pos][d] += 1
+                pos_last[pos][d] = i
+            if window and len(win) > window:
+                for pos, d in enumerate(win.popleft()):
+                    pos_counts[pos][d] -= 1
+                    if pos_counts[pos][d] == 0:
+                        del pos_counts[pos][d]
+        train_mean = (sum(train_hits) / len(train_hits)
+                      if train_hits else 0.0)
+        if best is None or train_mean > best[1]:
+            best = (name, train_mean, test_hits, kind, window)
+    name, train_mean, test_hits, kind, window = best
+    pos_counts = [Counter() for _ in range(n_pos)]
+    pos_last = [dict() for _ in range(n_pos)]
+    pool = draws[-window:] if window else draws
+    for d in pool:
+        for pos, dig in enumerate(d):
+            pos_counts[pos][dig] += 1
+    for i, actual in enumerate(draws):
+        for pos, dig in enumerate(actual):
+            pos_last[pos][dig] = i
+    next_pick = _digit_rule_pick(kind, window, pos_counts, pos_last,
+                                 len(draws))
+    return name, train_mean, test_hits, next_pick, len(D34_RULE_GRID)
 
 
 # ---------------------------------------------------------------------------
@@ -366,7 +470,7 @@ def gap_table(draws, p, max_gap, is_daily=False):
     within each position, pooled. Returns a dataframe.
     """
     if is_daily:
-        last = [dict() for _ in range(5)]
+        last = [dict() for _ in range(len(draws[0]))]
         gaps = []
         for i, actual in enumerate(draws):
             for pos, d in enumerate(actual):
@@ -567,26 +671,47 @@ def render_fantasy_tab():
     )
 
 
-def render_daily_tab():
-    st.subheader("Daily 5")
-    st.caption(
-        "Null model: each draw is 5 independent uniform digits 0-9, "
-        "in order. Baseline: 0.5 matching positions per draw (10% per "
-        "position), exact-sequence probability 1/100,000. "
-        "Walk-forward methods use a trailing 25-draw window. "
-        "Sample-size warning: this tab's built-in history starts "
-        "August 2026, so confidence intervals are wide — treat every "
-        "deviation as noise unless it is very large."
-    )
+def render_digit_tab(n_pos, title, csv_name, baseline, exact_denom,
+                     upload_key, popular=None, run_rule_search=False):
+    """Shared renderer for Daily 3 / Daily 4 / Daily 5 tabs.
+
+    popular: fixed lucky sequence (Daily 5 only) or None.
+    run_rule_search: True for Daily 3/4 (long history); False for
+    Daily 5 (history too short to split 70/30).
+    """
+    st.subheader(title)
+    if run_rule_search:
+        st.caption(
+            f"Null model: each draw is {n_pos} independent uniform "
+            f"digits 0-9, in order. Baseline: {baseline:.1f} matching "
+            f"positions per draw (10% per position), exact-sequence "
+            f"probability 1/{exact_denom:,}. Walk-forward methods "
+            f"use a trailing 25-draw window; the backtested-rule "
+            f"method searches {len(D34_RULE_GRID)} candidate rules "
+            f"on the first 70% of draws and tests the winner on the "
+            f"last 30%, so its n differs."
+        )
+    else:
+        st.caption(
+            f"Null model: each draw is {n_pos} independent uniform "
+            f"digits 0-9, in order. Baseline: {baseline:.1f} matching "
+            f"positions per draw (10% per position), exact-sequence "
+            f"probability 1/{exact_denom:,}. Walk-forward methods "
+            f"use a trailing 25-draw window. Sample-size warning: "
+            f"this tab's built-in history starts August 2026, so "
+            f"confidence intervals are wide — treat every deviation "
+            f"as noise unless it is very large."
+        )
     uploaded = st.file_uploader(
-        "Upload a Daily 5 results file (CSV) — optional",
-        type="csv", key="d5_upload")
+        f"Upload a {title} results file (CSV) — optional",
+        type="csv", key=upload_key)
     df = load_draws(
         uploaded,
-        Path(__file__).parent / "data" / "daily5_history.csv",
-        "Daily 5")
+        Path(__file__).parent / "data" / csv_name,
+        title)
     if df is None:
         st.stop()
+    methods = D5_METHODS if popular is not None else D34_METHODS
     for t in ordered_types(df, ["MIDDAY DRAWING", "EVENING DRAWING"]):
         st.divider()
         st.header(t.title())
@@ -603,74 +728,106 @@ def render_daily_tab():
                  f"{sub['Draw Date'].min().strftime('%b %d, %Y')} "
                  f"– {sub['Draw Date'].max().strftime('%b %d, %Y')}")
         with st.spinner("Backtesting all methods on real draws…"):
-            results, next_picks = daily_backtest(draws)
-        # ML row: not run — n too small for a train/test split.
-        rows = scoreboard_rows(results, BASELINE_D5)
-        rows.append({
-            "Method": "ML (train/test split)",
-            "n (test draws)": "—",
-            "Score": "—",
-            "Baseline": f"{BASELINE_D5:.3f}",
-            "95% CI": "—",
-            "Verdict": "Not run — n too small to split",
-            "Exact hits": "—",
-        })
-        order = ["Hot", "Cold", "Balanced", "Gap",
-                 "ML (train/test split)", "Random", "Anti", "Popular"]
-        table = pd.DataFrame(rows)
-        table["__o"] = table["Method"].apply(
-            lambda m: order.index(m) if m in order else 99)
-        st.dataframe(table.sort_values("__o").drop(columns="__o"),
-                     width="stretch")
-        st.caption(
-            "Multiple-comparison note: 7 methods compared (ML not "
-            "run). At α = 0.05 you'd expect ~0.35 false 'winners' by "
-            "chance alone — and none appeared beyond noise."
-        )
-        st.subheader("What each method would play next — with its score")
-        for m in ["Hot", "Cold", "Balanced", "Gap", "Random", "Anti",
-                  "Popular"]:
-            sc, _, _ = results[m]
-            mean, _ = mean_ci(sc)
-            st.write(f"**{m}** — `{next_picks[m]}` — backtested "
-                     f"{mean:.3f} matches/draw vs baseline "
-                     f"{BASELINE_D5:.3f}")
+            results, next_picks = daily_backtest(draws, popular=popular)
+            if run_rule_search:
+                (rule_name, rule_train, rule_test, rule_next,
+                 n_rules) = digit_rule_search(draws)
+        if run_rule_search:
+            render_scoreboard(results, next_picks, baseline, exact_denom,
+                              ml_row=(rule_test,
+                                      "Backtested rule (tuned on train)"))
+            rule_test_mean, _ = mean_ci(rule_test)
+            st.write(
+                f"**Backtested-rule next pick** — `{rule_next}` — the "
+                f"winning rule is **{rule_name}** (train "
+                f"{rule_train:.3f} matches/draw, test "
+                f"{rule_test_mean:.3f} vs baseline {baseline:.3f})."
+            )
+            st.caption(
+                f"Multiple-comparison note: {len(methods) + 1} methods "
+                f"compared (plus {n_rules} candidate rules inside "
+                f"the tuned-rule search). At α = 0.05 you'd expect "
+                f"~0.35 false 'winners' by chance alone — and none "
+                f"appeared beyond noise."
+            )
+        else:
+            # ML row: not run — n too small for a train/test split.
+            rows = scoreboard_rows(results, baseline)
+            rows.append({
+                "Method": "ML (train/test split)",
+                "n (test draws)": "—",
+                "Score": "—",
+                "Baseline": f"{baseline:.3f}",
+                "95% CI": "—",
+                "Verdict": "Not run — n too small to split",
+                "Exact hits": "—",
+            })
+            order = ["Hot", "Cold", "Balanced", "Gap",
+                     "ML (train/test split)", "Random", "Anti", "Popular"]
+            table = pd.DataFrame(rows)
+            table["__o"] = table["Method"].apply(
+                lambda m: order.index(m) if m in order else 99)
+            st.dataframe(table.sort_values("__o").drop(columns="__o"),
+                         width="stretch")
+            st.caption(
+                "Multiple-comparison note: 7 methods compared (ML not "
+                "run). At α = 0.05 you'd expect ~0.35 false 'winners' "
+                "by chance alone — and none appeared beyond noise."
+            )
+            st.subheader("What each method would play next — with its score")
+            for m in methods:
+                sc, _, _ = results[m]
+                mean, _ = mean_ci(sc)
+                st.write(f"**{m}** — `{next_picks[m]}` — backtested "
+                         f"{mean:.3f} matches/draw vs baseline "
+                         f"{baseline:.3f}")
 
     st.divider()
-    st.header("Why the methods fail — two visuals")
+    if run_rule_search:
+        st.header("Why the methods fail — three visuals")
+    else:
+        st.header("Why the methods fail — two visuals")
     mid = chronological(df[df["Drawing Type"] == "MIDDAY DRAWING"])
     if not mid:
         mid = chronological(df)
     st.subheader("1. Window-size roulette: the 'signal' is the window")
+    win_b = 100 if run_rule_search else 25
     with st.spinner("Checking hot digits at two window sizes…"):
-        hot10, _ = daily_backtest(mid, window=10)
-        hot25, _ = daily_backtest(mid, window=25)
-        c10 = [Counter() for _ in range(5)]
+        hot10, _ = daily_backtest(mid, window=10, popular=popular)
+        hotb, _ = daily_backtest(mid, window=win_b, popular=popular)
+        c10 = [Counter() for _ in range(n_pos)]
         for d in mid[-10:]:
             for pos, dig in enumerate(d):
                 c10[pos][dig] += 1
-        c25 = [Counter() for _ in range(5)]
-        for d in mid[-25:]:
+        cb = [Counter() for _ in range(n_pos)]
+        for d in mid[-win_b:]:
             for pos, dig in enumerate(d):
-                c25[pos][dig] += 1
+                cb[pos][dig] += 1
         list10 = [sorted(range(10),
                          key=lambda dig: (-c10[pos].get(dig, 0), dig))[0]
-                  for pos in range(5)]
-        list25 = [sorted(range(10),
-                         key=lambda dig: (-c25[pos].get(dig, 0), dig))[0]
-                  for pos in range(5)]
+                  for pos in range(n_pos)]
+        listb = [sorted(range(10),
+                        key=lambda dig: (-cb[pos].get(dig, 0), dig))[0]
+                 for pos in range(n_pos)]
     m10, _ = mean_ci(hot10["Hot"][0])
-    m25, _ = mean_ci(hot25["Hot"][0])
+    mb, _ = mean_ci(hotb["Hot"][0])
     col1, col2 = st.columns(2)
     col1.write(f"**Hot, last 10 draws:** `{list10}` — backtested "
                f"{m10:.3f} matches/draw")
-    col2.write(f"**Hot, last 25 draws:** `{list25}` — backtested "
-               f"{m25:.3f} matches/draw")
-    st.caption(
-        "Different sequences, same score — and with only ~43 test "
-        "draws, the intervals are wide enough to swallow any "
-        "difference. That width is itself the lesson for Daily 5."
-    )
+    col2.write(f"**Hot, last {win_b} draws:** `{listb}` — backtested "
+               f"{mb:.3f} matches/draw")
+    if run_rule_search:
+        st.caption(
+            "Different sequences, same score — and with hundreds of "
+            "test draws, the intervals are narrow enough that any "
+            "real signal would show. It doesn't."
+        )
+    else:
+        st.caption(
+            "Different sequences, same score — and with only ~43 test "
+            "draws, the intervals are wide enough to swallow any "
+            "difference. That width is itself the lesson for Daily 5."
+        )
     st.subheader("2. Gaps are memoryless: empirical vs geometric")
     st.caption(
         "Per-position gaps pooled, geometric with p = 0.10: the "
@@ -679,13 +836,43 @@ def render_daily_tab():
     )
     gap_df = gap_table(mid, 0.10, 20, is_daily=True)
     st.bar_chart(gap_df.set_index("Gap (draws)"))
-    st.subheader("3. Train vs test: why there is no third visual")
-    st.write(
-        "With ~67 draws, a 70/30 split leaves ~20 test draws. Any "
-        "'accuracy' on 20 draws is pure noise, so the ML method is "
-        "not run here at all — saying so is more honest than "
-        "printing a number."
-    )
+    if run_rule_search:
+        st.subheader("3. Train vs test: the tuned rule collapses")
+        with st.spinner("Running the rule search…"):
+            (rule_name_mid, rule_train_mid, rule_test_mid,
+             _rule_next_mid, _n) = digit_rule_search(mid)
+        t_mean, _ = mean_ci(rule_test_mid)
+        st.write(
+            f"The best of {len(D34_RULE_GRID)} candidate rules on "
+            f"the first 70% of draws was **{rule_name_mid}** "
+            f"(train {rule_train_mid:.3f} matches/draw). On the "
+            f"last 30% it scored **{t_mean:.3f}** vs a baseline of "
+            f"{baseline:.3f} — the in-sample edge was selection "
+            f"noise, and it did not survive contact with new draws."
+        )
+    else:
+        st.subheader("3. Train vs test: why there is no third visual")
+        st.write(
+            "With ~67 draws, a 70/30 split leaves ~20 test draws. Any "
+            "'accuracy' on 20 draws is pure noise, so the ML method is "
+            "not run here at all — saying so is more honest than "
+            "printing a number."
+        )
+
+
+def render_daily_tab():
+    render_digit_tab(5, "Daily 5", "daily5_history.csv", BASELINE_D5,
+                     100_000, "d5_upload", popular=D5_POPULAR)
+
+
+def render_daily3_tab():
+    render_digit_tab(3, "Daily 3", "daily3_history.csv", 0.3,
+                     1_000, "d3_upload", run_rule_search=True)
+
+
+def render_daily4_tab():
+    render_digit_tab(4, "Daily 4", "daily4_history.csv", 0.4,
+                     10_000, "d4_upload", run_rule_search=True)
 
 
 # ---------------------------------------------------------------------------
@@ -748,8 +935,9 @@ def _f5_random_pick_for(idx, window=100, seed=42):
 
 def _d5_state_before(draws, idx, window=25):
     """Per-position trailing-window state just before draw `idx`."""
-    pos_counts = [Counter() for _ in range(5)]
-    pos_last = [dict() for _ in range(5)]
+    n_pos = len(draws[0])
+    pos_counts = [Counter() for _ in range(n_pos)]
+    pos_last = [dict() for _ in range(n_pos)]
     for i in range(idx):
         for pos, d in enumerate(draws[i]):
             pos_last[pos][d] = i
@@ -759,11 +947,11 @@ def _d5_state_before(draws, idx, window=25):
     return pos_counts, pos_last
 
 
-def _d5_random_pick_for(idx, window=25, seed=42):
+def _d5_random_pick_for(idx, window=25, seed=42, n_pos=5):
     """The Random pick the walk-forward backtest made for draw `idx`."""
     rng = random.Random(seed)
     for i in range(window, idx + 1):
-        pick = [rng.randrange(10) for _ in range(5)]
+        pick = [rng.randrange(10) for _ in range(n_pos)]
         if i == idx:
             return pick
     return None
@@ -773,13 +961,14 @@ def _fmt_pick(pick):
     return ", ".join(str(x) for x in pick)
 
 
-def _method_comparison(df, drawing_type, day, is_daily):
+def _method_comparison(df, drawing_type, day, is_daily, popular=None,
+                       run_rule_search=False):
     """Per-method picks for `day`, made only from draws before that
     day, scored against that day's actual winners.
 
     Returns (table, scores): table is the dataframe shown for the day
     (or None when the draw isn't in the data yet); scores maps each
-    method to its hits (Fantasy 5) or matching positions (Daily 5).
+    method to its hits (Fantasy 5) or matching positions (digit games).
     """
     sub = df[df["Drawing Type"] == drawing_type]
     dates = sorted(sub["Draw Date"].unique())
@@ -791,10 +980,17 @@ def _method_comparison(df, drawing_type, day, is_daily):
     scores = {}
     if is_daily:
         pos_counts, pos_last = _d5_state_before(draws, idx)
-        picks = daily_picks(pos_counts, pos_last, idx)
-        picks["Random"] = _d5_random_pick_for(idx)
-        order = ["Hot", "Cold", "Balanced", "Gap", "Random",
-                 "Anti", "Popular"]
+        picks = daily_picks(pos_counts, pos_last, idx, popular=popular)
+        picks["Random"] = _d5_random_pick_for(idx, n_pos=len(draws[0]))
+        if run_rule_search:
+            with st.spinner("Checking the backtested rule's pick…"):
+                _, _, _, rule_next, _ = digit_rule_search(draws[:idx])
+            picks["Backtested rule"] = rule_next
+        order = ["Hot", "Cold", "Balanced", "Gap", "Random", "Anti"]
+        if popular is not None:
+            order.append("Popular")
+        if run_rule_search:
+            order.append("Backtested rule")
         rows = []
         for m in order:
             pick = picks[m]
@@ -840,9 +1036,11 @@ def render_winners_tab():
     )
     base = Path(__file__).parent / "data"
     f5 = _builtin_draws(base / "fantasy5_history.csv")
+    d3 = _builtin_draws(base / "daily3_history.csv")
+    d4 = _builtin_draws(base / "daily4_history.csv")
     d5 = _builtin_draws(base / "daily5_history.csv")
     all_dates = set()
-    for df in (f5, d5):
+    for df in (f5, d3, d4, d5):
         if df is not None:
             all_dates.update(df["Draw Date"].unique())
     days = sorted((pd.Timestamp(d) for d in all_dates),
@@ -850,11 +1048,17 @@ def render_winners_tab():
     if not days:
         st.write("none — no draws in the data yet")
         return
+    # kind: "f5" (Fantasy 5), "d5" (Daily 5), "d34" (Daily 3/4 —
+    # same methods as Daily 5 minus Popular, plus a backtested rule).
     drawings = [
-        ("Fantasy 5 — Regular", "REGULAR DRAWING", f5, False),
-        ("Fantasy 5 — Double Play", "DOUBLE PLAY DRAWING", f5, False),
-        ("Daily 5 — Midday", "MIDDAY DRAWING", d5, True),
-        ("Daily 5 — Evening", "EVENING DRAWING", d5, True),
+        ("Fantasy 5 — Regular", "REGULAR DRAWING", f5, "f5"),
+        ("Fantasy 5 — Double Play", "DOUBLE PLAY DRAWING", f5, "f5"),
+        ("Daily 3 — Midday", "MIDDAY DRAWING", d3, "d34"),
+        ("Daily 3 — Evening", "EVENING DRAWING", d3, "d34"),
+        ("Daily 4 — Midday", "MIDDAY DRAWING", d4, "d34"),
+        ("Daily 4 — Evening", "EVENING DRAWING", d4, "d34"),
+        ("Daily 5 — Midday", "MIDDAY DRAWING", d5, "d5"),
+        ("Daily 5 — Evening", "EVENING DRAWING", d5, "d5"),
     ]
     st.write("**Winning numbers — last 5 days**")
     win_rows = []
@@ -871,11 +1075,13 @@ def render_winners_tab():
     totals = {label: {} for label, _, _, _ in drawings}
     day_tables = {}
     for day in days:
-        for label, drawing_type, df, is_daily in drawings:
+        for label, drawing_type, df, kind in drawings:
             if df is None:
                 continue
             table, scores = _method_comparison(
-                df, drawing_type, day, is_daily)
+                df, drawing_type, day, kind != "f5",
+                popular=D5_POPULAR if kind == "d5" else None,
+                run_rule_search=(kind == "d34"))
             day_tables[(day, label)] = table
             if scores:
                 for m, s in scores.items():
@@ -886,17 +1092,19 @@ def render_winners_tab():
     st.caption(
         "Total hits per method across the 5 days. By chance alone, "
         "Fantasy 5 averages 0.641 hits per draw — about 3.2 in 5 days; "
-        "Daily 5 averages 0.5 matching positions per draw — about 2.5 "
-        "in 5 days. A good 5 days for a method here is still just "
-        "noise unless it repeats."
+        "Daily 3 averages 0.3 matching positions per draw — about 1.5 "
+        "in 5 days; Daily 4 averages 0.4 — about 2.0 in 5 days; "
+        "Daily 5 averages 0.5 — about 2.5 in 5 days. A good 5 days "
+        "for a method here is still just noise unless it repeats."
     )
-    for label, _, _, is_daily in drawings:
+    for label, _, _, kind in drawings:
         st.write(f"**{label}**")
-        methods = ["Hot", "Cold", "Balanced", "Gap", "Random",
-                   "Anti", "Popular"]
-        if not is_daily:
+        methods = ["Hot", "Cold", "Balanced", "Gap", "Random", "Anti"]
+        if kind == "d5":
+            methods.append("Popular")
+        if kind in ("f5", "d34"):
             methods.append("Backtested rule")
-        col = ("Total matching positions in 5 days" if is_daily
+        col = ("Total matching positions in 5 days" if kind != "f5"
                else "Total hits in 5 days")
         rows = [{"Method": m, col: str(totals[label].get(m, 0))}
                 for m in methods]
@@ -923,10 +1131,14 @@ def render_winners_tab():
 # Tabs
 # ---------------------------------------------------------------------------
 
-tab_f5, tab_d5, tab_win = st.tabs(
-    ["Fantasy 5", "Daily 5", "Recent Winners"])
+tab_f5, tab_d3, tab_d4, tab_d5, tab_win = st.tabs(
+    ["Fantasy 5", "Daily 3", "Daily 4", "Daily 5", "Recent Winners"])
 with tab_f5:
     render_fantasy_tab()
+with tab_d3:
+    render_daily3_tab()
+with tab_d4:
+    render_daily4_tab()
 with tab_d5:
     render_daily_tab()
 with tab_win:
@@ -940,23 +1152,30 @@ with st.expander("Honesty rules baked into this page"):
         "- **Every method is labeled** by what it is: a walk-forward "
         "backtest, or a train/test split. Never a 'winner picker.'\n"
         "- **Multiple comparisons are stated**, not hidden: 8 "
-        "Fantasy 5 methods, 7 Daily 5 methods, and the number of "
-        "false winners chance alone would produce.\n"
+        "Fantasy 5 methods, 7 Daily 3 methods, 7 Daily 4 methods, "
+        "7 Daily 5 methods, and the number of false winners chance "
+        "alone would produce.\n"
         "- **No single 'play this' without the scoreboard next to "
         "it.** Every next-draw suggestion on this page carries the "
         "score it earned in backtesting.\n"
         "- **Daily 5's n is printed prominently**, with the power "
-        "limit stated: at ~67 draws, only gross bias is detectable.\n"
+        "limit stated: at ~67 draws, only gross bias is detectable. "
+        "Daily 3 and Daily 4 have ~730 draws per stream, so their "
+        "intervals are narrow — and still bracket the baseline.\n"
         "- **The one real number-choice effect is on payout, not "
         "probability:** popular numbers (birthdays, lucky digits) "
         "don't change your odds, but in a pari-mutuel game they "
         "change your expected share if you win, because more people "
-        "pick them."
+        "pick them. Daily 3 and Daily 4 pay fixed prizes, so there "
+        "is no share effect there — and they carry no Popular "
+        "method at all."
     )
 st.caption(
     "Reality check, stated as the prediction itself: every Fantasy 5 "
-    "combination has probability 1/575,757 per draw, and every Daily 5 "
-    "ordered sequence has probability 1/100,000 per draw. The methods "
+    "combination has probability 1/575,757 per draw, every Daily 3 "
+    "ordered sequence has probability 1/1,000, every Daily 4 ordered "
+    "sequence has probability 1/10,000, and every Daily 5 ordered "
+    "sequence has probability 1/100,000 per draw. The methods "
     "above disagree with each other and all score the same as random "
     "— because that's what randomness does."
 )

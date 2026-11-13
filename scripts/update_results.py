@@ -50,17 +50,27 @@ DETROIT = ZoneInfo("America/Detroit")
 GAMES = {
     "5": ("data/fantasy5_history.csv",
           ["REGULAR DRAWING", "DOUBLE PLAY DRAWING"], "fantasy5"),
+    "T": ("data/daily3_history.csv",
+          ["MIDDAY DRAWING"], "daily3"),
+    "3": ("data/daily3_history.csv",
+          ["EVENING DRAWING"], "daily3"),
+    "F": ("data/daily4_history.csv",
+          ["MIDDAY DRAWING"], "daily4"),
+    "4": ("data/daily4_history.csv",
+          ["EVENING DRAWING"], "daily4"),
     "J": ("data/daily5_history.csv",
           ["MIDDAY DRAWING"], "daily5"),
     "2": ("data/daily5_history.csv",
           ["EVENING DRAWING"], "daily5"),
 }
 
-# Full drawing-type order per file, for newest-first sorting. (Daily 5
-# is one file shared by two game codes, so the sort order cannot come
-# from a single game's type list.)
+# Full drawing-type order per file, for newest-first sorting. (Daily 3/4/5
+# are one file each shared by two game codes, so the sort order cannot
+# come from a single game's type list.)
 FILE_TYPE_ORDER = {
     "data/fantasy5_history.csv": ["REGULAR DRAWING", "DOUBLE PLAY DRAWING"],
+    "data/daily3_history.csv": ["MIDDAY DRAWING", "EVENING DRAWING"],
+    "data/daily4_history.csv": ["MIDDAY DRAWING", "EVENING DRAWING"],
     "data/daily5_history.csv": ["MIDDAY DRAWING", "EVENING DRAWING"],
 }
 
@@ -113,14 +123,25 @@ def validate_fantasy5(numbers: str):
     return ",".join(str(n) for n in nums)
 
 
-def validate_daily5(numbers: str):
-    parts = numbers.split(",")
-    if len(parts) != 5:
-        raise ValueError(f"Daily 5 needs 5 digits: {numbers!r}")
-    digits = [int(p) for p in parts]
-    if any(d < 0 or d > 9 for d in digits):
-        raise ValueError(f"Daily 5 digits out of range: {numbers!r}")
-    return ",".join(str(d) for d in digits)
+def validate_digits(n):
+    def _v(numbers: str):
+        parts = numbers.split(",")
+        if len(parts) != n:
+            raise ValueError(f"Daily {n} needs {n} digits: {numbers!r}")
+        digits = [int(p) for p in parts]
+        if any(d < 0 or d > 9 for d in digits):
+            raise ValueError(f"Daily {n} digits out of range: "
+                             f"{numbers!r}")
+        return ",".join(str(d) for d in digits)
+    return _v
+
+
+VALIDATORS = {
+    "fantasy5": validate_fantasy5,
+    "daily3": validate_digits(3),
+    "daily4": validate_digits(4),
+    "daily5": validate_digits(5),
+}
 
 
 def fetch_game(page, code: str, start: date, end: date):
@@ -178,8 +199,8 @@ def merge_game(code: str, path: Path, types, kind: str,
     if start < latest:
         start = latest  # only ever fill forward from the latest we hold
     added = []
-    validate = (validate_fantasy5 if kind == "fantasy5"
-                else validate_daily5)
+    added_keys = set()
+    validate = VALIDATORS[kind]
     if kind == "fantasy5":
         # The export may or may not carry a Drawing Type column. With
         # it, use it; without it, rows come in displayed order per
@@ -209,9 +230,15 @@ def merge_game(code: str, path: Path, types, kind: str,
         for d, nums, _ in downloaded:
             if d < start or d > end:
                 continue
-            if (d, dtype) in have:
+            # First row per (date, type) wins. Daily 3 Evening
+            # occasionally carries a second "EVE BONUS DRAW" on the
+            # same date (5 such dates in Jul 2026); the export lists
+            # the regular draw first, so the bonus row is skipped
+            # here rather than creating a duplicate date.
+            if (d, dtype) in have or (d, dtype) in added_keys:
                 continue
             added.append((d, validate(nums), dtype))
+            added_keys.add((d, dtype))
     if not added:
         return 0
     # Newest date first; within a date, file order (Regular before

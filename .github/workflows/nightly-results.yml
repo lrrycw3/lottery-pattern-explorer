@@ -3,7 +3,7 @@ name: Nightly lottery results
 # Keeps the built-in Fantasy 5, Daily 3, Daily 4 and Daily 5 datasets
 # current without any manual approval: the workflow reads the official
 # Michigan Lottery Past Results tool, merges new draws into the CSVs,
-# and commits them. Runs after the 7:29 p.m. ET draws.
+# and commits them. Runs at 11:00 a.m. ET, before the evening draws; the export lags a day, so each run picks up yesterday's draws.
 on:
   schedule:
     # 11:00 EST (16:00 UTC); 12:00 EDT in daylight time. Runs

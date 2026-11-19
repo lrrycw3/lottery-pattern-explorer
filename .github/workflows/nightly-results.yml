@@ -6,8 +6,9 @@ name: Nightly lottery results
 # and commits them. Runs after the 7:29 p.m. ET draws.
 on:
   schedule:
-    # 21:41 EST (02:41 UTC); 22:41 EDT in daylight time. Either way
-    # it is after the evening draws.
+    # 11:00 EST (16:00 UTC); 12:00 EDT in daylight time. Runs
+    # before the evening draws; the export lags a day, so this
+    # picks up yesterday's draws by late morning.
     - cron: "0 16 * * *"
   workflow_dispatch:
 

@@ -8,7 +8,7 @@ on:
   schedule:
     # 21:41 EST (02:41 UTC); 22:41 EDT in daylight time. Either way
     # it is after the evening draws.
-    - cron: "41 2 * * *"
+    - cron: "0 16 * * *"
   workflow_dispatch:
 
 permissions:

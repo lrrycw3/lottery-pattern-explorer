@@ -2,8 +2,16 @@ name: Nightly lottery results
 
 # Keeps the built-in Fantasy 5, Daily 3, Daily 4 and Daily 5 datasets
 # current without any manual approval: the workflow reads the official
-# Michigan Lottery Past Results tool, merges new draws into the CSVs,
-# and commits them. Runs at 11:00 a.m. ET, before the evening draws; the export lags a day, so each run picks up yesterday's draws.
+# Michigan Lottery Past Results CSV export, merges new draws into the
+# CSVs, and commits them. Runs at 11:00 a.m. ET, before the evening
+# draws; the export lags a day, so each run picks up yesterday's draws.
+#
+# 2026-11-26: rewritten for the Lottery's redesigned site. The old
+# Playwright flow (old /resources/number-tools page, Start/End text
+# boxes, "Get Results" button) died when that page started 404ing
+# (runs #23-25 failed). The new flow is a plain HTTP GET of the
+# public CSV export behind the Number Tools page's Download CSV link,
+# so no browser and no Playwright install are needed anymore.
 on:
   schedule:
     # 11:00 EST (16:00 UTC); 12:00 EDT in daylight time. Runs
@@ -25,27 +33,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Playwright
-        timeout-minutes: 10
-        run: |
-          pip install playwright
-          # No --with-deps: GitHub's ubuntu runner already carries the
-          # browser libraries, and --with-deps stalled for an hour on
-          # the Ubuntu font-mirror downloads in run #1.
-          playwright install chromium
-
       - name: Update results from Michigan Lottery
-        timeout-minutes: 15
+        timeout-minutes: 5
         run: python scripts/update_results.py
-
-      - name: Upload debug artifacts on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-pages
-          path: |
-            debug-*.png
-            debug-*.html
 
       - name: Commit and push if the data changed
         run: |

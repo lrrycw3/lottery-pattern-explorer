@@ -1,26 +1,39 @@
 #!/usr/bin/env python3
 """Nightly lottery results updater (runs in GitHub Actions).
 
-Reads the official Michigan Lottery Past Results tool with Playwright
-and merges any missing draws into data/fantasy5_history.csv and
-data/daily5_history.csv.
+Reads the official Michigan Lottery Past Results CSV export and merges
+any missing draws into data/fantasy5_history.csv, data/daily3_history.csv,
+data/daily4_history.csv and data/daily5_history.csv.
 
 Source (official Michigan Lottery only, never a third-party site):
-the Past Results tool, queried separately for the three games:
-  - Fantasy 5:        SELECTED_GAME=5 (Regular + Double Play rows)
-  - Daily 5 Midday:   SELECTED_GAME=J
-  - Daily 5 Evening:  SELECTED_GAME=2
-The tool is interactive (no deep-linkable results URL), so the script
-fills the Start/End date fields, clicks "Get Results", and reads the
-official "Download" CSV export for the requested range. The export is
-machine-readable, so no numbers are ever scraped from ball graphics.
+the public CSV export behind the redesigned Number Tools page
+(https://www.michiganlottery.com/number-tools):
+
+    https://api.michiganlottery.com/rest/v1/past-results/csv
+        ?slug=<game>&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
+
+The slugs are fantasy-5, daily-3, daily-4, daily-5 — the same slugs the
+Number Tools page itself uses in its Download CSV link. No auth, no
+API key, no browser automation: a plain HTTP GET returns text/csv.
+
+This replaced the old Playwright flow on 2026-11-26: the Lottery
+redesigned its site, the old /resources/number-tools page now 404s,
+and the old Start/End text boxes + "Get Results" button no longer
+exist, so runs #23-25 failed. The new export format differs from the
+old one:
+
+  - Fantasy 5: header "Draw,Winning Numbers,Secondary Winning Numbers";
+    Draw is a bare date ("2026-11-25"); Winning Numbers is the Regular
+    drawing, Secondary Winning Numbers is the Double Play drawing.
+  - Daily 3/4/5: header "Draw,Winning Numbers"; Draw is a date plus a
+    drawing name ("2026-11-25 Evening" / "2026-11-25 Midday").
 
 Range: from each dataset's latest date through today
 (America/Detroit). Multi-day gaps self-repair from the range query.
 
 Format preserved per file: UTF-8 BOM, all fields quoted, newest
 first, Fantasy 5 Regular row before Double Play per date, Daily 5
-Midday before Evening per date. Daily 5 digits stay in drawn order
+Midday before Evening per date. Daily digits stay in drawn order
 and are never sorted or deduplicated; Fantasy 5 numbers are stored
 exactly as the official export lists them.
 
@@ -32,41 +45,39 @@ is only added if it was read from michiganlottery.com in this run.
 
 import csv
 import sys
+import urllib.request
 from datetime import date, timedelta
 from io import StringIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from playwright.sync_api import sync_playwright
-
-BASE_URL = (
-    "https://www.michiganlottery.com/resources/number-tools"
-    "?SELECTED_TOOL=PAST_RESULTS&SELECTED_GAME={code}"
+API_URL = (
+    "https://api.michiganlottery.com/rest/v1/past-results/csv"
+    "?slug={slug}&startDate={start}&endDate={end}"
 )
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DETROIT = ZoneInfo("America/Detroit")
 
-# game code -> (csv path, drawing types in file order, validator)
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0 Safari/537.36"
+)
+
+# slug -> (csv path, drawing types in file order, validator)
 GAMES = {
-    "5": ("data/fantasy5_history.csv",
-          ["REGULAR DRAWING", "DOUBLE PLAY DRAWING"], "fantasy5"),
-    "T": ("data/daily3_history.csv",
-          ["MIDDAY DRAWING"], "daily3"),
-    "3": ("data/daily3_history.csv",
-          ["EVENING DRAWING"], "daily3"),
-    "F": ("data/daily4_history.csv",
-          ["MIDDAY DRAWING"], "daily4"),
-    "4": ("data/daily4_history.csv",
-          ["EVENING DRAWING"], "daily4"),
-    "J": ("data/daily5_history.csv",
-          ["MIDDAY DRAWING"], "daily5"),
-    "2": ("data/daily5_history.csv",
-          ["EVENING DRAWING"], "daily5"),
+    "fantasy-5": ("data/fantasy5_history.csv",
+                  ["REGULAR DRAWING", "DOUBLE PLAY DRAWING"], "fantasy5"),
+    "daily-3": ("data/daily3_history.csv",
+                ["MIDDAY DRAWING", "EVENING DRAWING"], "daily3"),
+    "daily-4": ("data/daily4_history.csv",
+                ["MIDDAY DRAWING", "EVENING DRAWING"], "daily4"),
+    "daily-5": ("data/daily5_history.csv",
+                ["MIDDAY DRAWING", "EVENING DRAWING"], "daily5"),
 }
 
-# Full drawing-type order per file, for newest-first sorting. (Daily 3/4/5
-# are one file each shared by two game codes, so the sort order cannot
-# come from a single game's type list.)
+# Full drawing-type order per file, for newest-first sorting.
 FILE_TYPE_ORDER = {
     "data/fantasy5_history.csv": ["REGULAR DRAWING", "DOUBLE PLAY DRAWING"],
     "data/daily3_history.csv": ["MIDDAY DRAWING", "EVENING DRAWING"],
@@ -77,6 +88,7 @@ FILE_TYPE_ORDER = {
 
 def today_detroit() -> date:
     from datetime import datetime
+
     return datetime.now(DETROIT).date()
 
 
@@ -85,8 +97,17 @@ def parse_date(s: str) -> date:
     return date(year, month, day)
 
 
+def parse_iso_date(s: str) -> date:
+    year, month, day = (int(x) for x in s.strip().split("-"))
+    return date(year, month, day)
+
+
 def fmt_date(d: date) -> str:
     return d.strftime("%m/%d/%Y")
+
+
+def fmt_iso_date(d: date) -> str:
+    return d.strftime("%Y-%m-%d")
 
 
 def read_csv_rows(path: Path):
@@ -144,46 +165,59 @@ VALIDATORS = {
 }
 
 
-def fetch_game(page, code: str, start: date, end: date):
+def fetch_game(slug: str, start: date, end: date):
     """Download the official Past Results CSV for one game + range.
 
-    Returns [(date, numbers_str, drawing_type_or_None)] in file order.
+    Returns [(date, numbers_str, drawing_type)] in file order.
     """
-    page.goto(BASE_URL.format(code=code), wait_until="domcontentloaded")
-    get_results = page.get_by_role("button", name="Get Results")
-    get_results.wait_for(timeout=60000)
-    # Type the dates with real keystrokes: these are React date inputs
-    # that only parse typed input, not programmatic value sets.
-    for name, value in (("Start Date", fmt_date(start)),
-                        ("End Date", fmt_date(end))):
-        box = page.get_by_role("textbox", name=name)
-        box.click()
-        box.press_sequentially(value, delay=30)
-    page.keyboard.press("Tab")
-    get_results.wait_for(state="visible")
-    if not get_results.is_enabled():
+    url = API_URL.format(slug=slug,
+                         start=fmt_iso_date(start),
+                         end=fmt_iso_date(end))
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            if resp.status != 200:
+                raise RuntimeError(
+                    f"Past Results CSV for {slug} returned "
+                    f"HTTP {resp.status}")
+            text = resp.read().decode("utf-8-sig")
+    except Exception as e:
         raise RuntimeError(
-            f"Get Results stayed disabled for game {code} "
-            f"({fmt_date(start)} to {fmt_date(end)})")
-    get_results.click()
-    # Wait for the results table to render before looking for Download.
-    page.locator("text=Displaying").first.wait_for(timeout=120000)
-    with page.expect_download(timeout=120000) as dl_info:
-        page.get_by_role("link", name="Download").first.click()
-    download = dl_info.value
-    tmp = REPO_ROOT / f".past-results-{code}.csv"
-    download.save_as(tmp)
-    text = tmp.read_bytes().decode("utf-8-sig")
-    tmp.unlink()
+            f"Could not read Past Results CSV for {slug} "
+            f"({fmt_date(start)} to {fmt_date(end)}): {e}")
+
     rows = []
     for row in csv.DictReader(StringIO(text)):
-        d = parse_date(row["Draw Date"])
-        nums = row["Winning Numbers"].strip()
-        dtype = (row.get("Drawing Type") or "").strip() or None
-        rows.append((d, nums, dtype))
+        draw = (row.get("Draw") or "").strip()
+        if not draw:
+            continue
+        parts = draw.split(" ", 1)
+        d = parse_iso_date(parts[0])
+        if slug == "fantasy-5":
+            regular = (row.get("Winning Numbers") or "").strip()
+            double = (row.get("Secondary Winning Numbers") or "").strip()
+            if not regular or not double:
+                raise RuntimeError(
+                    f"Fantasy 5 {fmt_date(d)}: missing Regular or "
+                    f"Double Play numbers in {row!r}")
+            rows.append((d, regular, "REGULAR DRAWING"))
+            rows.append((d, double, "DOUBLE PLAY DRAWING"))
+        else:
+            nums = (row.get("Winning Numbers") or "").strip()
+            suffix = parts[1].strip().upper() if len(parts) > 1 else ""
+            if suffix == "MIDDAY":
+                dtype = "MIDDAY DRAWING"
+            elif suffix == "EVENING":
+                dtype = "EVENING DRAWING"
+            else:
+                raise RuntimeError(
+                    f"{slug} {fmt_date(d)}: unexpected Draw value "
+                    f"{draw!r}")
+            rows.append((d, nums, dtype))
+
     if not rows:
         raise RuntimeError(
-            f"No rows downloaded for game {code} "
+            f"No rows downloaded for {slug} "
             f"({fmt_date(start)} to {fmt_date(end)})")
     return rows
 
@@ -202,9 +236,6 @@ def merge_game(code: str, path: Path, types, kind: str,
     added_keys = set()
     validate = VALIDATORS[kind]
     if kind == "fantasy5":
-        # The export may or may not carry a Drawing Type column. With
-        # it, use it; without it, rows come in displayed order per
-        # date: Regular first, then Double Play.
         by_date = {}
         for d, nums, dtype in downloaded:
             by_date.setdefault(d, []).append((nums, dtype))
@@ -213,12 +244,6 @@ def merge_game(code: str, path: Path, types, kind: str,
                 continue
             entries = by_date[d]
             for i, (nums, dtype) in enumerate(entries):
-                if dtype is None:
-                    if len(entries) != 2:
-                        raise RuntimeError(
-                            f"Fantasy 5 {fmt_date(d)}: expected 2 rows "
-                            f"without a type column, got {len(entries)}")
-                    dtype = types[i]
                 if dtype not in types:
                     raise RuntimeError(
                         f"Unexpected Fantasy 5 type {dtype!r}")
@@ -226,8 +251,7 @@ def merge_game(code: str, path: Path, types, kind: str,
                     continue
                 added.append((d, validate(nums), dtype))
     else:
-        dtype = types[0]
-        for d, nums, _ in downloaded:
+        for d, nums, dtype in downloaded:
             if d < start or d > end:
                 continue
             # First row per (date, type) wins. Daily 3 Evening
@@ -255,42 +279,23 @@ def main() -> int:
     today = today_detroit()
     # Per-file latest dates, so each game queries only what it lacks.
     latest_by_file = {}
-    for code, (rel, _, _) in GAMES.items():
+    for slug, (rel, _, _) in GAMES.items():
         path = REPO_ROOT / rel
         rows, _ = read_csv_rows(path)
         latest_by_file[rel] = max(d for d, _, _ in rows)
     total_added = 0
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
-        page = browser.new_page(
-            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/126.0 Safari/537.36"))
-        try:
-            for code, (rel, types, kind) in GAMES.items():
-                path = REPO_ROOT / rel
-                start = latest_by_file[rel]
-                if start >= today:
-                    print(f"game {code}: {rel} already current "
-                          f"through {fmt_date(start)}")
-                    continue
-                try:
-                    downloaded = fetch_game(page, code, start, today)
-                except Exception:
-                    # Save what the page looked like so a failed run
-                    # can be diagnosed from its artifacts.
-                    page.screenshot(
-                        path=str(REPO_ROOT / f"debug-{code}.png"),
-                        full_page=True)
-                    (REPO_ROOT / f"debug-{code}.html").write_text(
-                        page.content(), encoding="utf-8")
-                    raise
-                added = merge_game(code, path, types, kind,
-                                   downloaded, start, today)
-                total_added += added
-                print(f"game {code}: added {added} row(s) to {rel}")
-        finally:
-            browser.close()
+    for slug, (rel, types, kind) in GAMES.items():
+        path = REPO_ROOT / rel
+        start = latest_by_file[rel]
+        if start >= today:
+            print(f"{slug}: {rel} already current "
+                  f"through {fmt_date(start)}")
+            continue
+        downloaded = fetch_game(slug, start, today)
+        added = merge_game(slug, path, types, kind,
+                           downloaded, start, today)
+        total_added += added
+        print(f"{slug}: added {added} row(s) to {rel}")
     print(f"total rows added: {total_added}")
     return 0
 
